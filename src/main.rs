@@ -20,6 +20,7 @@ struct Metadata {
 
 struct BlockInfo {
     block_size: usize,
+    /* number of existing blocks. also current (last) block. */
     block_count: usize,
 }
 
