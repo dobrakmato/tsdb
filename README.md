@@ -9,15 +9,10 @@ Features:
 - [ ] query cache
 - [ ] textual command interface
 - [ ] binary command interface
+- [x] < 2500 lines of code
 
 
 ### ACID
-
-#### Durability
-
-Server employs redo-log to allow for disaster recovery. Commands are not confirmed
-(and thus should be treated as not executed by clients) until they are written to
-redo log and flushed to non-volatile memory.
 
 ### Data structure
 
@@ -45,7 +40,6 @@ Currently these schemas are supported: `f32`.
 ##### f32
 
 - Alignment: `4 bytes`
-- Storage: 1024 values per block 
 - Encoding: low-endian without any compression
 
 
