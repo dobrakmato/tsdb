@@ -4,16 +4,28 @@ extern crate log;
 use std::collections::HashMap;
 use std::path::{PathBuf, Path};
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Read, Write, Error, ErrorKind};
+use std::io::{Seek, SeekFrom, Read, Write};
 use std::collections::hash_map::Entry;
 use std::time::{SystemTime, Duration, Instant};
+use static_assertions::{assert_eq_align, assert_eq_size};
 
 const BLOCK_SIZE: usize = 4096;
 const BLOCKS_PER_FILE: usize = 2048;
 const ENTRY_MAX_SIZE: usize = 16;
 
+/// Header of each block.
+struct BlockHeader {
+    free_bytes: u8,
+}
+
+const BLOCK_HEADER_SIZE: usize = std::mem::size_of::<BlockHeader>();
+
 /// Simple new-type struct representing the block.
-struct Block([u8; BLOCK_SIZE]);
+struct Block(BlockHeader, [u8; BLOCK_SIZE - BLOCK_HEADER_SIZE]);
+
+// These assertions ensure we can safely interpret Block structure as [u8; 4096]
+assert_eq_size!(Block, [u8; BLOCK_SIZE]);
+assert_eq_align!(Block, u8);
 
 /// Simple small-vec type used to represent BlockEntry.
 struct BlockEntry([u8; ENTRY_MAX_SIZE], usize);
@@ -56,6 +68,14 @@ impl Schema {
         }
 
         return BlockEntry(entry_buffer, entry_size);
+    }
+
+    fn decode(&self, last_timestamp: u64, last_value: f32, mut buff: &[u8]) -> (u64, f32) {
+        let dt = leb128::read::unsigned(&mut buff).expect("cannot decode LEB128");
+        let f_bytes = &buff[0..4];
+        let dv = f32::from_le_bytes([f_bytes[0], f_bytes[1], f_bytes[2], f_bytes[3]]);
+
+        return (last_timestamp + dt, last_value + dv);
     }
 }
 
@@ -103,8 +123,36 @@ impl Series {
 
 #[derive(Debug)]
 struct Index {
-    timestamp_start: Vec<usize>,
-    timestamp_end: Vec<usize>,
+    timestamp_min: Vec<u64>,
+    timestamp_max: Vec<u64>,
+}
+
+impl Index {
+    fn ensure_vec_has_enough_storage(vec: &mut Vec<u64>, for_block_id: usize) {
+        assert!(vec.len() >= for_block_id);
+
+        if vec.len() < for_block_id + 1 {
+            // when we push to the full Vec in Rust the backing
+            // allocation size is doubled. this is not really what we
+            // want because our Index grows linearly and predictably.
+            // for that reason we reserve additional 8 bytes manually.
+            if vec.capacity() == vec.len() {
+                vec.reserve(8);
+            }
+            vec.push(0);
+        }
+    }
+
+    /// block_id must be valid block id
+    pub fn set_min(&mut self, block_id: usize, timestamp: u64) {
+        Index::ensure_vec_has_enough_storage(&mut self.timestamp_min, block_id);
+        self.timestamp_min[block_id] = timestamp;
+    }
+
+    pub fn set_max(&mut self, block_id: usize, timestamp: u64) {
+        Index::ensure_vec_has_enough_storage(&mut self.timestamp_max, block_id);
+        self.timestamp_max[block_id] = timestamp;
+    }
 }
 
 /******************************/
@@ -179,6 +227,10 @@ impl BlockCache {
         return mut_ref;
     }
 
+    pub fn contains_block(&self, block_spec: &BlockSpec) -> bool {
+        return self.loaded_blocks.contains_key(block_spec);
+    }
+
     /// Returns a block specified by BlockSpec from the cache if it
     /// is in the cache, otherwise returns None.
     pub fn get_mut(&mut self, block_spec: &BlockSpec) -> Option<&mut Block> {
@@ -240,12 +292,23 @@ impl BlockIO {
         let file = self.load_or_create_file_for_block(block_spec);
         BlockIO::seek_to_block_start(file, block_spec);
 
-        let mut block = Block([0; BLOCK_SIZE]);
+        let header = BlockHeader { free_bytes: 0 };
+        let mut block = Block(header, [0; BLOCK_SIZE - BLOCK_HEADER_SIZE]);
 
-        // The file can either have contents (in which case we just read
-        // it) or the block is not yet allocated (for example if we just
-        // created the file and are writing first block).
-        file.read_exact(&mut block.0).unwrap();
+        // Here we need to load the data from file into memory
+        // to prevent copying we will interpret the new Block structure
+        // instance as if it was a 4096 bytes long u8 array.
+        //
+        // To do this safely we must ensure the proper size and
+        // alignment. For this reason we have static assertions.
+        //
+        // Safe: because Block has size of BLOCK_SIZE and alignment of 1.
+        let ptr = &mut block as *mut Block as *mut u8;
+        let mut bytes = unsafe {
+            std::slice::from_raw_parts_mut(ptr, BLOCK_SIZE)
+        };
+
+        file.read_exact(&mut bytes).unwrap();
         return block;
     }
 
@@ -255,7 +318,17 @@ impl BlockIO {
         let file = self.load_or_create_file_for_block(block_spec);
         BlockIO::seek_to_block_start(file, block_spec);
 
-        file.write_all(&block.0).unwrap();
+        // Here we need to write data of the block into the
+        // file. We can prevent copying by interpreting the Block
+        // structure as if it was 4096 bytes long array.
+        //
+        // Safe: because Block has size of BLOCK_SIZE and alignment of 1.
+        let ptr = block as *const Block as *const u8;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(ptr, BLOCK_SIZE)
+        };
+
+        file.write_all(bytes).unwrap();
         // file.sync_all().unwrap();
     }
 }
@@ -289,7 +362,30 @@ struct Server {
 }
 
 impl Server {
-    fn create_series(&mut self) {}
+    fn acquire_block<'a>(block_cache: &'a mut BlockCache, block_io: &mut BlockIO, block_spec: &BlockSpec) -> &'a mut Block {
+        if block_cache.contains_block(&block_spec) {
+            return block_cache.get_mut(&block_spec).unwrap();
+        }
+        let block = block_io.load_or_create_block(&block_spec);
+        block_cache.insert(block_spec.clone(), block)
+    }
+
+    fn create_series(&mut self, name: &str, schema: Schema) {
+        let series = Series {
+            name: name.to_owned(),
+            schema,
+            metadata: Metadata { sparsity: 0.0, avg_timestamp_delta: 0.0 },
+            blocks_info: BlocksInfo {
+                block_size: BLOCK_SIZE,
+                block_count: 1,
+                last_block_used_bytes: 0,
+                last_block_last_timestamp: 0,
+                last_block_last_value: 0.0,
+            },
+            index: Index { timestamp_min: vec![], timestamp_max: vec![] },
+        };
+        self.series.insert(name.to_owned(), series);
+    }
 
     pub fn insert(&mut self, series: &str, value: f32) {
         let mut series = self.series.get_mut(series).unwrap();
@@ -302,53 +398,96 @@ impl Server {
             series.blocks_info.last_block_last_value,
             value,
         );
+
+        // remember the data inside BlockInfo struct to save encoder's state
         series.blocks_info.last_block_last_value = value;
         series.blocks_info.last_block_last_timestamp = current_timestamp;
 
-        // check if the block is full and we need to create new block
-        if BLOCK_SIZE - series.blocks_info.last_block_used_bytes < encoded.1 {
-            series.blocks_info.block_count += 1;
-            series.blocks_info.last_block_used_bytes = 0;
-        }
+        // decide and return the block we should write data to.
+        let (block_spec, mut block) = {
+            let mut block_spec = series.create_last_block_spec();
+            let mut block = Server::acquire_block(&mut self.block_cache, &mut self.block_io, &block_spec);
 
-        let last_block_spec = series.create_last_block_spec();
-        let last_block = match self.block_cache.get_mut(&last_block_spec) {
-            Some(t) => t,
-            None => {
-                let block = self.block_io.load_or_create_block(&last_block_spec);
-                self.block_cache.insert(last_block_spec.clone(), block)
+            // check if the block is full and we need to create new block
+            if BLOCK_SIZE - series.blocks_info.last_block_used_bytes < encoded.1 {
+                // to properly close current block we should write the number
+                // of unused bytes to the block's start so we can later decode
+                // the data from it.
+                let last_block_free_bytes = block.1.len() - series.blocks_info.last_block_used_bytes;
+                block.0.free_bytes = last_block_free_bytes as u8;
+                self.block_io.write_and_flush_block(&block_spec, block);
+
+                // index: as this is the last value in this block we should
+                // update timestamp_max index.
+                series.index.set_max(block_spec.block_id, current_timestamp);
+
+                // we can now proceed with creating a new block
+                series.blocks_info.block_count += 1;
+                series.blocks_info.last_block_used_bytes = 0;
+
+                block_spec = series.create_last_block_spec();
+                block = Server::acquire_block(&mut self.block_cache, &mut self.block_io, &block_spec);
             }
+
+            (block_spec, block)
         };
+
+        // index: if this is the first value in this block we should
+        // update timestamp_min index.
+        if series.blocks_info.last_block_used_bytes == 0 {
+            series.index.set_min(block_spec.block_id, current_timestamp);
+        }
 
         // here we actually write the timestamp and provided value to the
         // block. we need to trim the buffer or zeros at the end.
         let actual_encoded_data = &encoded.0[0..encoded.1];
         for (i, x) in actual_encoded_data.iter().enumerate() {
-            last_block.0[series.blocks_info.last_block_used_bytes + i] = *x;
+            block.1[series.blocks_info.last_block_used_bytes + i] = *x;
         }
         series.blocks_info.last_block_used_bytes += actual_encoded_data.len();
 
         // now just write the block and flush
-        self.block_io.write_and_flush_block(&last_block_spec, last_block);
+        self.block_io.write_and_flush_block(&block_spec, block);
+    }
+
+    pub fn select_avg(&mut self, series: &str) -> f32 {
+        let mut agg = AvgAgg::new();
+        let mut series = self.series.get_mut(series).unwrap();
+
+        // find indices using binary search in index
+        let start_block = 0;
+        let end_block = series.blocks_info.block_count;
+
+        // linear scan
+        for block_id in start_block..=end_block {
+            let spec = series.create_block_spec(block_id);
+            let block = Server::acquire_block(&mut self.block_cache, &mut self.block_io, &spec);
+
+            // iterate over the block data
+        }
+
+        return agg.avg;
+    }
+}
+
+struct AvgAgg {
+    avg: f32,
+    t: u64,
+}
+
+impl AvgAgg {
+    pub fn new() -> Self {
+        AvgAgg { avg: 0.0, t: 0 }
+    }
+
+    pub fn next(&mut self, item: f32) {
+        self.avg += (item - self.avg) / self.t as f32;
+        self.t += 1;
     }
 }
 
 fn main() {
     simple_logger::init().unwrap();
-
-    let mut series = Series {
-        name: "default".to_owned(),
-        schema: Schema::F32,
-        metadata: Metadata { sparsity: 0.0, avg_timestamp_delta: 0.0 },
-        blocks_info: BlocksInfo {
-            block_size: BLOCK_SIZE,
-            block_count: 1,
-            last_block_used_bytes: 0,
-            last_block_last_timestamp: 0,
-            last_block_last_value: 0.0,
-        },
-        index: Index { timestamp_start: vec![], timestamp_end: vec![] },
-    };
 
     let mut server = Server {
         series: Default::default(),
@@ -360,7 +499,7 @@ fn main() {
         time_source: TimeSource::new(),
     };
 
-    server.series.insert("default".to_owned(), series);
+    server.create_series("default", Schema::F32);
 
     let records = 50000;
 
@@ -369,5 +508,9 @@ fn main() {
         server.insert("default", i as f32);
     }
     println!("inserted {} records in {}s", records, start.elapsed().as_secs_f32());
-    println!("{:#?}", server.series.get("default"));
+    println!("{:#?}", server.series.get("default").unwrap());
+
+    let start = Instant::now();
+    let avg = server.select_avg("default");
+    println!("computed avg={} in {}s", avg, start.elapsed().as_secs_f32());
 }
