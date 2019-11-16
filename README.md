@@ -21,7 +21,7 @@ of each other and can have different data-values with different timestamps. Each
 **Series** has a name and data schema associated with it.
 
 Data points in one **Series** object is split into multiple **Blocks**. Each block
-has a size of `4096` bytes. Multiple blocks (`8192`) are stored in one file. The
+has a size of `4096` bytes. Multiple blocks (`2048`) are stored in one file. The
 data points can be stored inside multiple files. Some blocks can be loaded in memory
 and others can be stored only on disk. 
 
