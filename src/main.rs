@@ -8,10 +8,11 @@ use std::io::{Seek, SeekFrom, Read, Write};
 use std::collections::hash_map::Entry;
 use std::time::{SystemTime, Duration, Instant};
 use static_assertions::{assert_eq_align, assert_eq_size};
+use std::fmt::{Debug, Formatter, Error};
+use nano_leb128::ULEB128;
 
 const BLOCK_SIZE: usize = 4096;
 const BLOCKS_PER_FILE: usize = 2048;
-const ENTRY_MAX_SIZE: usize = 16;
 
 /// Header of each block.
 struct BlockHeader {
@@ -27,9 +28,37 @@ struct Block(BlockHeader, [u8; BLOCK_SIZE - BLOCK_HEADER_SIZE]);
 assert_eq_size!(Block, [u8; BLOCK_SIZE]);
 assert_eq_align!(Block, u8);
 
-/// Simple small-vec type used to represent BlockEntry.
-struct BlockEntry([u8; ENTRY_MAX_SIZE], usize);
+struct SmallVec {
+    storage: [u8; Self::MAX_SIZE],
+    len: u8,
+}
 
+impl SmallVec {
+    const MAX_SIZE: usize = 16;
+
+    pub fn new() -> Self {
+        SmallVec { storage: [0; 16], len: 0 }
+    }
+
+    pub fn data(&self) -> &[u8] {
+        return &self.storage[0..self.len as usize];
+    }
+
+    pub fn write(&mut self, value: u8) {
+        self.storage[self.len as usize] += value;
+        self.len += 1;
+    }
+
+    pub fn read(&mut self) -> u8 {
+        let v = self.storage[self.len as usize];
+        self.len += 1;
+        return v;
+    }
+
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+}
 /*************************/
 
 /// Enumeration of all supported schemas
@@ -46,36 +75,61 @@ impl Schema {
         }
     }
 
-    fn encode(&self, last_timestamp: u64, current_timestamp: u64, last_value: f32, current_value: f32) -> BlockEntry {
-        let mut entry_buffer = [0u8; ENTRY_MAX_SIZE];
-        let mut entry_size = 0;
-
+    fn codec(&self) -> impl Codec {
         match self {
-            Schema::F32 => {
-                let dt = current_timestamp - last_timestamp;
-                let dv = current_value - last_value;
-
-                let mut writable: &mut [u8] = &mut entry_buffer;
-
-                entry_size += leb128::write::unsigned(&mut writable, dt).unwrap();
-
-                dv.to_le_bytes()
-                    .iter()
-                    .enumerate()
-                    .for_each(|(i, x)| entry_buffer[entry_size + i] = *x);
-                entry_size += 4;
-            }
+            Schema::F32 => F32 {},
         }
+    }
+}
 
-        return BlockEntry(entry_buffer, entry_size);
+trait Codec {
+    type EncoderState: Default;
+    type DecoderState: Default;
+    fn encode(current_timestamp: u64, current_value: f32, state: &mut Self::EncoderState) -> SmallVec;
+    fn decode(buff: &[u8], state: &mut Self::DecoderState) -> (u64, f32, usize);
+}
+
+#[derive(Default, Debug)]
+struct F32State {
+    last_timestamp: u64,
+}
+
+struct F32;
+
+/// Timestamp: LEB128 delta-encoded
+/// Value: F32 uncompressed
+impl Codec for F32 {
+    type EncoderState = F32State;
+    type DecoderState = F32State;
+
+    fn encode(current_timestamp: u64, current_value: f32, state: &mut Self::EncoderState) -> SmallVec {
+        let mut vec = SmallVec::new();
+
+        let dt = current_timestamp - state.last_timestamp;
+        vec.len += ULEB128::from(dt).write_into(&mut vec.storage).unwrap() as u8;
+
+        current_value.to_le_bytes()
+            .iter()
+            .for_each(|x| vec.write(*x));
+
+        state.last_timestamp = current_timestamp;
+
+        return vec;
     }
 
-    fn decode(&self, last_timestamp: u64, last_value: f32, mut buff: &[u8]) -> (u64, f32) {
-        let dt = leb128::read::unsigned(&mut buff).expect("cannot decode LEB128");
-        let f_bytes = &buff[0..4];
-        let dv = f32::from_le_bytes([f_bytes[0], f_bytes[1], f_bytes[2], f_bytes[3]]);
+    fn decode(buff: &[u8], state: &mut Self::DecoderState) -> (u64, f32, usize) {
+        let (dt, read) = ULEB128::read_from(buff).unwrap();
+        let value = f32::from_le_bytes([
+            buff[read + 0],
+            buff[read + 1],
+            buff[read + 2],
+            buff[read + 3]
+        ]);
 
-        return (last_timestamp + dt, last_value + dv);
+        let ct = state.last_timestamp + u64::from(dt);
+        state.last_timestamp = ct;
+
+        return (ct, value, read + 4);
     }
 }
 
@@ -96,8 +150,7 @@ struct BlocksInfo {
     block_count: usize,
     /* number of used bytes inside the last block */
     last_block_used_bytes: usize,
-    last_block_last_timestamp: u64,
-    last_block_last_value: f32,
+    encoder_state: F32State,
 }
 
 #[derive(Debug)]
@@ -119,9 +172,12 @@ impl Series {
     pub fn create_last_block_spec(&self) -> BlockSpec {
         return self.create_block_spec(self.blocks_info.block_count - 1);
     }
+
+    pub fn is_last_block(&self, block_id: usize) -> bool {
+        return self.blocks_info.block_count - 1 == block_id;
+    }
 }
 
-#[derive(Debug)]
 struct Index {
     timestamp_min: Vec<u64>,
     timestamp_max: Vec<u64>,
@@ -152,6 +208,16 @@ impl Index {
     pub fn set_max(&mut self, block_id: usize, timestamp: u64) {
         Index::ensure_vec_has_enough_storage(&mut self.timestamp_max, block_id);
         self.timestamp_max[block_id] = timestamp;
+    }
+
+    pub fn min_for(&self, block_id: usize) -> u64 {
+        return self.timestamp_min[block_id];
+    }
+}
+
+impl Debug for Index {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        f.write_fmt(format_args!("Index {{ min_len={}, max_len={} }}", self.timestamp_min.len(), self.timestamp_max.len()))
     }
 }
 
@@ -329,7 +395,7 @@ impl BlockIO {
         };
 
         file.write_all(bytes).unwrap();
-        // file.sync_all().unwrap();
+        // file.sync_all().unwrap(); todo: fsync policy
     }
 }
 
@@ -379,8 +445,7 @@ impl Server {
                 block_size: BLOCK_SIZE,
                 block_count: 1,
                 last_block_used_bytes: 0,
-                last_block_last_timestamp: 0,
-                last_block_last_value: 0.0,
+                encoder_state: Default::default(),
             },
             index: Index { timestamp_min: vec![], timestamp_max: vec![] },
         };
@@ -392,16 +457,7 @@ impl Server {
 
         // compute the data we are going to write to some block
         let current_timestamp = self.time_source.get_timestamp();
-        let encoded = series.schema.encode(
-            series.blocks_info.last_block_last_timestamp,
-            current_timestamp,
-            series.blocks_info.last_block_last_value,
-            value,
-        );
-
-        // remember the data inside BlockInfo struct to save encoder's state
-        series.blocks_info.last_block_last_value = value;
-        series.blocks_info.last_block_last_timestamp = current_timestamp;
+        let encoded = F32::encode(current_timestamp, value, &mut series.blocks_info.encoder_state);
 
         // decide and return the block we should write data to.
         let (block_spec, mut block) = {
@@ -409,7 +465,7 @@ impl Server {
             let mut block = Server::acquire_block(&mut self.block_cache, &mut self.block_io, &block_spec);
 
             // check if the block is full and we need to create new block
-            if BLOCK_SIZE - series.blocks_info.last_block_used_bytes < encoded.1 {
+            if BLOCK_SIZE - series.blocks_info.last_block_used_bytes < encoded.len() {
                 // to properly close current block we should write the number
                 // of unused bytes to the block's start so we can later decode
                 // the data from it.
@@ -440,7 +496,7 @@ impl Server {
 
         // here we actually write the timestamp and provided value to the
         // block. we need to trim the buffer or zeros at the end.
-        let actual_encoded_data = &encoded.0[0..encoded.1];
+        let actual_encoded_data = encoded.data();
         for (i, x) in actual_encoded_data.iter().enumerate() {
             block.1[series.blocks_info.last_block_used_bytes + i] = *x;
         }
@@ -456,14 +512,37 @@ impl Server {
 
         // find indices using binary search in index
         let start_block = 0;
-        let end_block = series.blocks_info.block_count;
+        let end_block = series.blocks_info.block_count - 1;
 
-        // linear scan
+        // first block in series has absolute timestamp, but search can
+        // start at other than first block so we must lookup last_timestamp
+        // using index in that case.
+        let min_timestamp = if start_block == 0 { 0 } else { series.index.min_for(start_block) };
+        let mut decoder_state = F32State { last_timestamp: min_timestamp };
+
+        // linear scan trough blocks
         for block_id in start_block..=end_block {
             let spec = series.create_block_spec(block_id);
             let block = Server::acquire_block(&mut self.block_cache, &mut self.block_io, &spec);
 
-            // iterate over the block data
+            // if end_block is last block of the series we should use
+            // information about values from BlockInfo rather from block itself
+            // as the block contains zero as number of free_bytes.
+            let block_used_bytes = if series.is_last_block(block_id) {
+                series.blocks_info.last_block_used_bytes
+            } else {
+                block.1.len() - block.0.free_bytes as usize
+            };
+
+            let mut i = 0;
+            while i < block_used_bytes {
+                let offset_buff = &block.1[i..];
+                let (ts, value, read) = F32::decode(offset_buff, &mut decoder_state);
+
+                agg.next(value);
+
+                i += read;
+            }
         }
 
         return agg.avg;
@@ -477,7 +556,7 @@ struct AvgAgg {
 
 impl AvgAgg {
     pub fn new() -> Self {
-        AvgAgg { avg: 0.0, t: 0 }
+        AvgAgg { avg: 0.0, t: 1 }
     }
 
     pub fn next(&mut self, item: f32) {

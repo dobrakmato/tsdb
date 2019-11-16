@@ -6,6 +6,6 @@ edition = "2018"
 
 [dependencies]
 static_assertions = "1.1.0"
-leb128 = "0.2.4"
+nano-leb128 = "0.1.0"
 log = "0.4.8"
 simple_logger = "1.3.0"
