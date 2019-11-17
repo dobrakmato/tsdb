@@ -10,6 +10,9 @@ use std::time::{SystemTime, Duration, Instant};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use std::fmt::{Debug, Formatter, Error};
 use nano_leb128::ULEB128;
+use crate::aggregates::{Aggregate, Average};
+
+mod aggregates;
 
 const BLOCK_SIZE: usize = 4096;
 const BLOCKS_PER_FILE: usize = 2048;
@@ -65,21 +68,6 @@ impl SmallVec {
 #[derive(Debug)]
 enum Schema {
     F32
-}
-
-impl Schema {
-    // todo: make this const fn when this is fixed: https://github.com/rust-lang/rust/issues/49146
-    fn datum_size(&self) -> usize {
-        match self {
-            Schema::F32 => std::mem::size_of::<f32>(),
-        }
-    }
-
-    fn codec(&self) -> impl Codec {
-        match self {
-            Schema::F32 => F32 {},
-        }
-    }
 }
 
 trait Codec {
@@ -217,7 +205,11 @@ impl Index {
 
 impl Debug for Index {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
-        f.write_fmt(format_args!("Index {{ min_len={}, max_len={} }}", self.timestamp_min.len(), self.timestamp_max.len()))
+        f.write_fmt(format_args!(
+            "Index {{ min_len={}, max_len={} }}",
+            self.timestamp_min.len(),
+            self.timestamp_max.len()
+        ))
     }
 }
 
@@ -344,9 +336,9 @@ impl BlockIO {
         };
     }
 
+    /// Compute starting position of requested block and seek the open
+    /// file to specified position and read block form the file.
     fn seek_to_block_start(file: &mut File, block_spec: &BlockSpec) {
-        // Compute starting position of requested block and seek the open
-        // file to specified position and read block form the file.
         let seek = SeekFrom::Start(block_spec.starting_pos_in_file() as u64);
         file.seek(seek).expect("cannot seek to specified position!");
     }
@@ -428,6 +420,18 @@ struct Server {
 }
 
 impl Server {
+    pub fn new(cache_size: usize, storage: PathBuf) -> Self {
+        Server {
+            series: Default::default(),
+            block_cache: BlockCache::new(cache_size), // 4mb
+            block_io: BlockIO {
+                storage,
+                open_files: Default::default(),
+            },
+            time_source: TimeSource::new(),
+        }
+    }
+
     fn acquire_block<'a>(block_cache: &'a mut BlockCache, block_io: &mut BlockIO, block_spec: &BlockSpec) -> &'a mut Block {
         if block_cache.contains_block(&block_spec) {
             return block_cache.get_mut(&block_spec).unwrap();
@@ -436,7 +440,9 @@ impl Server {
         block_cache.insert(block_spec.clone(), block)
     }
 
-    fn create_series(&mut self, name: &str, schema: Schema) {
+    /* commands */
+
+    pub fn create_series(&mut self, name: &str, schema: Schema) {
         let series = Series {
             name: name.to_owned(),
             schema,
@@ -465,7 +471,7 @@ impl Server {
             let mut block = Server::acquire_block(&mut self.block_cache, &mut self.block_io, &block_spec);
 
             // check if the block is full and we need to create new block
-            if BLOCK_SIZE - series.blocks_info.last_block_used_bytes < encoded.len() {
+            if BLOCK_SIZE - series.blocks_info.last_block_used_bytes <= encoded.len() {
                 // to properly close current block we should write the number
                 // of unused bytes to the block's start so we can later decode
                 // the data from it.
@@ -475,7 +481,7 @@ impl Server {
 
                 // index: as this is the last value in this block we should
                 // update timestamp_max index.
-                series.index.set_max(block_spec.block_id, current_timestamp);
+                series.index.set_max(block_spec.block_id, series.blocks_info.encoder_state.last_timestamp);
 
                 // we can now proceed with creating a new block
                 series.blocks_info.block_count += 1;
@@ -506,8 +512,7 @@ impl Server {
         self.block_io.write_and_flush_block(&block_spec, block);
     }
 
-    pub fn select_avg(&mut self, series: &str) -> f32 {
-        let mut agg = AvgAgg::new();
+    pub fn select_agg(&mut self, series: &str, agg: &mut impl Aggregate<f32>) -> f32 {
         let mut series = self.series.get_mut(series).unwrap();
 
         // find indices using binary search in index
@@ -545,38 +550,14 @@ impl Server {
             }
         }
 
-        return agg.avg;
-    }
-}
-
-struct AvgAgg {
-    avg: f32,
-    t: u64,
-}
-
-impl AvgAgg {
-    pub fn new() -> Self {
-        AvgAgg { avg: 0.0, t: 1 }
-    }
-
-    pub fn next(&mut self, item: f32) {
-        self.avg += (item - self.avg) / self.t as f32;
-        self.t += 1;
+        return agg.result();
     }
 }
 
 fn main() {
     simple_logger::init().unwrap();
 
-    let mut server = Server {
-        series: Default::default(),
-        block_cache: BlockCache::new(1024), // 4mb
-        block_io: BlockIO {
-            storage: PathBuf::from("./storage"),
-            open_files: Default::default(),
-        },
-        time_source: TimeSource::new(),
-    };
+    let mut server = Server::new(1024, PathBuf::from("./storage"));
 
     server.create_series("default", Schema::F32);
 
@@ -590,6 +571,6 @@ fn main() {
     println!("{:#?}", server.series.get("default").unwrap());
 
     let start = Instant::now();
-    let avg = server.select_avg("default");
+    let avg = server.select_agg("default", &mut Average::default());
     println!("computed avg={} in {}s", avg, start.elapsed().as_secs_f32());
 }
