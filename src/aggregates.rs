@@ -1,3 +1,9 @@
+// Contains all aggregate functions with their
+// structs (data types) that contain their internal state.
+//
+// All aggregate functions implement one trait called "Aggregate"
+// which ensure that all of them have the same interface.
+
 /// Basic trait used for all aggregate functions.
 pub trait Aggregate<T> {
     fn next(&mut self, item: T);
@@ -41,6 +47,12 @@ impl Aggregate<f32> for Count {
     }
 }
 
+/// Generates implementation of Aggregate for specified Type.
+///
+/// # Examples
+/// ```
+/// impl_basic_math_aggregate!(Min, min);
+/// ```
 macro_rules! impl_basic_math_aggregate {
     ($agg_name:ident, $fn_name:ident) => {
         /// Aggregate function that finds `$fn_name` value of items.

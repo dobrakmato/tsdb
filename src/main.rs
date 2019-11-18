@@ -10,9 +10,12 @@ use std::time::{SystemTime, Duration, Instant};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use std::fmt::{Debug, Formatter, Error};
 use nano_leb128::ULEB128;
-use crate::aggregates::{Average, Min, Max, Count, Sum};
+use crate::query_engine::{Selectable, Select};
+use crate::small_vec::SmallVec;
 
 mod aggregates;
+mod query_engine;
+mod small_vec;
 
 const BLOCK_SIZE: usize = 4096;
 const BLOCKS_PER_FILE: usize = 2048;
@@ -31,37 +34,7 @@ struct Block(BlockHeader, [u8; BLOCK_SIZE - BLOCK_HEADER_SIZE]);
 assert_eq_size!(Block, [u8; BLOCK_SIZE]);
 assert_eq_align!(Block, u8);
 
-struct SmallVec {
-    storage: [u8; Self::MAX_SIZE],
-    len: u8,
-}
 
-impl SmallVec {
-    const MAX_SIZE: usize = 16;
-
-    pub fn new() -> Self {
-        SmallVec { storage: [0; 16], len: 0 }
-    }
-
-    pub fn data(&self) -> &[u8] {
-        return &self.storage[0..self.len as usize];
-    }
-
-    pub fn write(&mut self, value: u8) {
-        self.storage[self.len as usize] += value;
-        self.len += 1;
-    }
-
-    pub fn read(&mut self) -> u8 {
-        let v = self.storage[self.len as usize];
-        self.len += 1;
-        return v;
-    }
-
-    pub fn len(&self) -> usize {
-        self.len as usize
-    }
-}
 /*************************/
 
 /// Enumeration of all supported schemas
@@ -94,11 +67,12 @@ impl Codec for F32 {
         let mut vec = SmallVec::new();
 
         let dt = current_timestamp - state.last_timestamp;
-        vec.len += ULEB128::from(dt).write_into(&mut vec.storage).unwrap() as u8;
+        let written = ULEB128::from(dt).write_into(vec.as_slice_mut()).unwrap();
+        vec.seek(written);
 
         current_value.to_le_bytes()
             .iter()
-            .for_each(|x| vec.write(*x));
+            .for_each(|x| vec.push(*x));
 
         state.last_timestamp = current_timestamp;
 
@@ -121,15 +95,6 @@ impl Codec for F32 {
     }
 }
 
-/// datas about datas in this series
-#[derive(Debug)]
-struct Metadata {
-    /* how sparse the data is */
-    sparsity: f32,
-    /* avg delta between consecutive data points in seconds */
-    avg_timestamp_delta: f32,
-}
-
 /// information about blocks in this series
 #[derive(Debug)]
 struct BlocksInfo {
@@ -145,7 +110,6 @@ struct BlocksInfo {
 struct Series {
     name: String,
     schema: Schema,
-    metadata: Metadata,
     blocks_info: BlocksInfo,
     index: Index,
 }
@@ -252,10 +216,10 @@ impl Index {
         let bytes = unsafe {
             std::slice::from_raw_parts(ptr, self.blocks.len() * std::mem::size_of::<MinMax>())
         };
-        self.file.write(bytes).unwrap();
+        self.file.write(bytes).expect("cannot write to index file");
 
         if should_sync {
-            self.file.sync_all().unwrap();
+            self.file.sync_all().expect("cannot sync index file");
         }
     }
 }
@@ -519,7 +483,6 @@ impl Server {
         let series = Series {
             name: name.to_owned(),
             schema,
-            metadata: Metadata { sparsity: 0.0, avg_timestamp_delta: 0.0 },
             blocks_info: BlocksInfo {
                 block_size: BLOCK_SIZE,
                 block_count: 1,
@@ -575,11 +538,10 @@ impl Server {
 
         // here we actually write the timestamp and provided value to the
         // block. we need to trim the buffer or zeros at the end.
-        let actual_encoded_data = encoded.data();
-        for (i, x) in actual_encoded_data.iter().enumerate() {
+        for (i, x) in encoded.as_slice().iter().enumerate() {
             block.1[series.blocks_info.last_block_used_bytes + i] = *x;
         }
-        series.blocks_info.last_block_used_bytes += actual_encoded_data.len();
+        series.blocks_info.last_block_used_bytes += encoded.len();
 
         // now just write the block and flush
         self.block_io.write_and_flush_block(&block_spec, block);
@@ -646,48 +608,6 @@ impl Server {
     }
 }
 
-/// All supported aggregate functions by the database.
-enum AggFn {
-    Avg(Average),
-    Min(Min),
-    Max(Max),
-    Count(Count),
-    Sum(Sum),
-}
-
-impl AggFn {
-    fn next(&mut self) {}
-}
-
-/// All kinds that are selectable and thus can be part of select result.
-enum Selectable {
-    Value,
-    Timestamp,
-    Aggregate(AggFn),
-}
-
-/// All possible group by intervals.
-enum GroupBy {
-    MINUTE,
-    HOUR,
-    DAY,
-    WEEK,
-    MONTH,
-}
-
-/// Struct representing FROM <min>, UNTIL <max>, BETWEEN <min> AND <max> clauses.
-struct Between {
-    min_timestamp: Option<usize>,
-    max_timestamp: Option<usize>,
-}
-
-/// Struct that represents a select query.
-struct Select<'a> {
-    select: Vec<Selectable>,
-    from: &'a str,
-    between: Option<Between>,
-    group_by: Option<GroupBy>,
-}
 
 #[derive(Debug, Default)]
 struct Row {
