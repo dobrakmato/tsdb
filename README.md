@@ -85,6 +85,6 @@ SELECT outdoor_sunlight BETWEEN 01-01-2019 AND 02-01-2019
 It is also possible to query result of running an aggregate function on specified range data points in the specified **Series** object.
 
 ```
-SELECT [AVG/SUM/MAX/MIN/STDDEV] {series} BETWEEN {start_timestamp} AND {end_timestamp} FOR EACH [MINUTE/HOUR/DAY/WEEK/MONTH]
-SELECT AVG outdoor_sunlight BETWEEN 01-01-2019 AND 02-01-2019 FOR EACH HOUR
+SELECT [AVG/SUM/MAX/MIN/COUNT] {series} BETWEEN {start_timestamp} AND {end_timestamp} GROUP BY [MINUTE/HOUR/DAY/WEEK/MONTH]
+SELECT AVG outdoor_sunlight BETWEEN 01-01-2019 AND 02-01-2019 GROUP BY HOUR
 ```

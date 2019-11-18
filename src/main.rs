@@ -10,7 +10,7 @@ use std::time::{SystemTime, Duration, Instant};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use std::fmt::{Debug, Formatter, Error};
 use nano_leb128::ULEB128;
-use crate::aggregates::{Aggregate, Average};
+use crate::aggregates::{Average, Min, Max, Count, Sum};
 
 mod aggregates;
 
@@ -166,13 +166,46 @@ impl Series {
     }
 }
 
+#[derive(Default)]
+struct MinMax {
+    min: u64,
+    max: u64,
+}
+
+assert_eq_size!(MinMax, [u64; 2]);
+assert_eq_align!(MinMax, u64);
+
 struct Index {
-    timestamp_min: Vec<u64>,
-    timestamp_max: Vec<u64>,
+    blocks: Vec<MinMax>,
+    fsync_policy: FsyncPolicy,
+    file: File,
+    dirty_from_bytes: usize,
 }
 
 impl Index {
-    fn ensure_vec_has_enough_storage(vec: &mut Vec<u64>, for_block_id: usize) {
+    fn create_file_path(storage: &Path, series_name: &str) -> PathBuf {
+        storage.join(format!("{}.idx", series_name))
+    }
+
+    fn load_or_create(file_path: PathBuf, fsync_policy: FsyncPolicy) -> Self {
+        let file = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .open(file_path)
+            .expect("cannot create or open file");
+
+        // todo: load index from file
+
+        Index {
+            blocks: vec![],
+            fsync_policy,
+            file,
+            dirty_from_bytes: 0,
+        }
+    }
+
+    fn ensure_vec_has_enough_storage<T>(vec: &mut Vec<T>, for_block_id: usize) where T: Default {
         assert!(vec.len() >= for_block_id);
 
         if vec.len() < for_block_id + 1 {
@@ -183,32 +216,55 @@ impl Index {
             if vec.capacity() == vec.len() {
                 vec.reserve(8);
             }
-            vec.push(0);
+            vec.push(Default::default());
         }
     }
 
     /// block_id must be valid block id
     pub fn set_min(&mut self, block_id: usize, timestamp: u64) {
-        Index::ensure_vec_has_enough_storage(&mut self.timestamp_min, block_id);
-        self.timestamp_min[block_id] = timestamp;
+        Index::ensure_vec_has_enough_storage(&mut self.blocks, block_id);
+        self.blocks.get_mut(block_id).unwrap().min = timestamp;
+        self.dirty_from_bytes = self.dirty_from_bytes.min(block_id);
+
+        self.write_and_flush_index();
     }
 
     pub fn set_max(&mut self, block_id: usize, timestamp: u64) {
-        Index::ensure_vec_has_enough_storage(&mut self.timestamp_max, block_id);
-        self.timestamp_max[block_id] = timestamp;
+        Index::ensure_vec_has_enough_storage(&mut self.blocks, block_id);
+        self.blocks.get_mut(block_id).unwrap().max = timestamp;
+        self.dirty_from_bytes = self.dirty_from_bytes.min(block_id);
+
+        self.write_and_flush_index();
     }
 
     pub fn min_for(&self, block_id: usize) -> u64 {
-        return self.timestamp_min[block_id];
+        return self.blocks.get(block_id).unwrap().min;
+    }
+
+    pub fn write_and_flush_index(&mut self) {
+        let should_sync = match &self.fsync_policy {
+            FsyncPolicy::Immediate => true,
+            FsyncPolicy::Never => false
+        };
+        self.file.seek(SeekFrom::Start(self.dirty_from_bytes as u64)).unwrap();
+
+        let ptr = self.blocks.as_slice().as_ptr() as *const u8;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(ptr, self.blocks.len() * std::mem::size_of::<MinMax>())
+        };
+        self.file.write(bytes).unwrap();
+
+        if should_sync {
+            self.file.sync_all().unwrap();
+        }
     }
 }
 
 impl Debug for Index {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         f.write_fmt(format_args!(
-            "Index {{ min_len={}, max_len={} }}",
-            self.timestamp_min.len(),
-            self.timestamp_max.len()
+            "Index {{ blocks={} }}",
+            self.blocks.len(),
         ))
     }
 }
@@ -301,6 +357,7 @@ impl BlockCache {
 struct BlockIO {
     storage: PathBuf,
     open_files: HashMap<PathBuf, File>,
+    fsync_policy: FsyncPolicy,
 }
 
 impl BlockIO {
@@ -373,6 +430,11 @@ impl BlockIO {
     /// Writes block data into file specified by BlockSpec with data
     /// that is stored in provided Block.
     pub fn write_and_flush_block(&mut self, block_spec: &BlockSpec, block: &Block) {
+        let should_sync = match &self.fsync_policy {
+            FsyncPolicy::Immediate => true,
+            FsyncPolicy::Never => false
+        };
+
         let file = self.load_or_create_file_for_block(block_spec);
         BlockIO::seek_to_block_start(file, block_spec);
 
@@ -387,8 +449,18 @@ impl BlockIO {
         };
 
         file.write_all(bytes).unwrap();
-        // file.sync_all().unwrap(); todo: fsync policy
+
+        if should_sync {
+            file.sync_all().unwrap()
+        }
     }
+}
+
+#[derive(Copy, Clone)]
+enum FsyncPolicy {
+    Immediate,
+    // Every10s,
+    Never,
 }
 
 struct TimeSource {
@@ -420,12 +492,13 @@ struct Server {
 }
 
 impl Server {
-    pub fn new(cache_size: usize, storage: PathBuf) -> Self {
+    pub fn new(cache_size: usize, storage: PathBuf, fsync_policy: FsyncPolicy) -> Self {
         Server {
             series: Default::default(),
             block_cache: BlockCache::new(cache_size), // 4mb
             block_io: BlockIO {
                 storage,
+                fsync_policy,
                 open_files: Default::default(),
             },
             time_source: TimeSource::new(),
@@ -453,7 +526,7 @@ impl Server {
                 last_block_used_bytes: 0,
                 encoder_state: Default::default(),
             },
-            index: Index { timestamp_min: vec![], timestamp_max: vec![] },
+            index: Index::load_or_create(Index::create_file_path(&self.block_io.storage, name), self.block_io.fsync_policy),
         };
         self.series.insert(name.to_owned(), series);
     }
@@ -512,12 +585,17 @@ impl Server {
         self.block_io.write_and_flush_block(&block_spec, block);
     }
 
-    pub fn select_agg(&mut self, series: &str, agg: &mut impl Aggregate<f32>) -> f32 {
-        let mut series = self.series.get_mut(series).unwrap();
+    pub fn select(&mut self, select: Select) -> ResultSet {
+        let mut result = ResultSet::default();
+        let series = self.series.get_mut(select.from).unwrap();
 
-        // find indices using binary search in index
+        // todo BETWEEN: find indices using binary search in index
         let start_block = 0;
         let end_block = series.blocks_info.block_count - 1;
+
+        // todo: GROUP BY
+
+        // todo: AGGREGATE FUNCTIONS
 
         // first block in series has absolute timestamp, but search can
         // start at other than first block so we must lookup last_timestamp
@@ -544,20 +622,93 @@ impl Server {
                 let offset_buff = &block.1[i..];
                 let (ts, value, read) = F32::decode(offset_buff, &mut decoder_state);
 
-                agg.next(value);
+                let mut row = Row::default();
+
+                for s in select.select.iter() {
+                    match s {
+                        Selectable::Timestamp => row.values.push(ts as f32),
+                        Selectable::Value => row.values.push(value),
+                        _ => {}
+                    }
+                }
+
+                if !row.values.is_empty() {
+                    result.rows.push(row);
+                }
 
                 i += read;
             }
+
+            result.statistics.scanned_blocks += 1;
         }
 
-        return agg.result();
+        return result;
     }
+}
+
+/// All supported aggregate functions by the database.
+enum AggFn {
+    Avg(Average),
+    Min(Min),
+    Max(Max),
+    Count(Count),
+    Sum(Sum),
+}
+
+impl AggFn {
+    fn next(&mut self) {}
+}
+
+/// All kinds that are selectable and thus can be part of select result.
+enum Selectable {
+    Value,
+    Timestamp,
+    Aggregate(AggFn),
+}
+
+/// All possible group by intervals.
+enum GroupBy {
+    MINUTE,
+    HOUR,
+    DAY,
+    WEEK,
+    MONTH,
+}
+
+/// Struct representing FROM <min>, UNTIL <max>, BETWEEN <min> AND <max> clauses.
+struct Between {
+    min_timestamp: Option<usize>,
+    max_timestamp: Option<usize>,
+}
+
+/// Struct that represents a select query.
+struct Select<'a> {
+    select: Vec<Selectable>,
+    from: &'a str,
+    between: Option<Between>,
+    group_by: Option<GroupBy>,
+}
+
+#[derive(Debug, Default)]
+struct Row {
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Default)]
+struct Statistics {
+    scanned_blocks: usize,
+}
+
+#[derive(Default, Debug)]
+struct ResultSet {
+    rows: Vec<Row>,
+    statistics: Statistics,
 }
 
 fn main() {
     simple_logger::init().unwrap();
 
-    let mut server = Server::new(1024, PathBuf::from("./storage"));
+    let mut server = Server::new(1024, PathBuf::from("./storage"), FsyncPolicy::Never);
 
     server.create_series("default", Schema::F32);
 
@@ -571,6 +722,13 @@ fn main() {
     println!("{:#?}", server.series.get("default").unwrap());
 
     let start = Instant::now();
-    let avg = server.select_agg("default", &mut Average::default());
-    println!("computed avg={} in {}s", avg, start.elapsed().as_secs_f32());
+    let result = server.select(Select {
+        select: vec![Selectable::Value],
+        from: "default",
+        between: None,
+        group_by: None,
+    });
+    let time = start.elapsed().as_secs_f32();
+    //println!("result={:#?}", result);
+    println!("computed {}s", time);
 }
