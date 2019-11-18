@@ -5,12 +5,18 @@ Features:
 - [ ] ACID compliant
 - [ ] high performance
 - [ ] multi-threaded
-- [ ] low memory usage
 - [ ] query cache
+- [ ] B-Tree index
+- [ ] one scalar per data-point
+- [ ] aggregate functions
+- [ ] `WHERE` on timestamp
+- [ ] `WHERE` on value
+- [ ] `GROUP BY` support on timestamp
 - [ ] textual command interface
 - [ ] binary command interface
-- [x] < 2500 lines of code
-
+- [ ] multiple scalars (tuples) per data-point
+- [ ] old data downsampling
+- [ ] old data deletion
 
 ### ACID
 
@@ -20,13 +26,12 @@ Data points are organized into individual **Series**. These series are independe
 of each other and can have different data-values with different timestamps. Each
 **Series** has a name and data schema associated with it.
 
-Data points in one **Series** object is split into multiple **Blocks**. Each block
-has a size of `4096` bytes. Multiple blocks (`2048`) are stored in one file. The
-data points can be stored inside multiple files. Some blocks can be loaded in memory
-and others can be stored only on disk. 
+Schema of the **Series** dictates how are the data points encoded on the disk.
 
-Timestamp data is delta-encoded using varints (integers with variable size). Encoding 
-of actual data-points is schema dependant.
+Data points in one **Series** are split into multiple **Blocks**. Each block
+has a size of `4096` bytes. These block form a *log-structured merge-tree*. 
+Multiple blocks (`2048`) are stored in one file. During the application execution
+some blocks are loaded in memory (cached). All blocks are stored on disk.
 
 The database also stores **Index** which is used to speed up queries on the data. Index
 object stores lowest and highest timestamp for each block. There is one **Index** for each
@@ -37,10 +42,22 @@ times.
 
 Currently these schemas are supported: `f32`.
 
+Planned schemas: `f32`, `i32`, `f64`, `i64`, `bool`.
+
 ##### f32
 
-- Alignment: `4 bytes`
-- Encoding: low-endian without any compression
+- Timestamp encoding: delta-encoded LEB128 varints
+- Value encoding: low-endian without any compression
+
+##### i32
+
+- Timestamp encoding: delta-encoded LEB128 varints
+- Value encoding: delta-encoded LEB128 varints
+
+##### bool
+
+- Timestamp encoding: delta-encoded LEB128 varints
+- Value encoding: One boolean takes one bit.
 
 
 ### Operations on the data

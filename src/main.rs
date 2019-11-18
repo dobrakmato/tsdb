@@ -16,6 +16,7 @@ use crate::small_vec::SmallVec;
 mod aggregates;
 mod query_engine;
 mod small_vec;
+mod block;
 
 const BLOCK_SIZE: usize = 4096;
 const BLOCKS_PER_FILE: usize = 2048;
@@ -348,9 +349,14 @@ impl BlockIO {
                     .open(file_path)
                     .expect("cannot create or open file");
 
-                // pre-allocate file content.
-                f.write_all(&[0u8; BLOCKS_PER_FILE * BLOCK_SIZE]).expect("cannot pre-allocate file");
-                f.sync_all().expect("cannot sync pre-allocated data to disk");
+                let meta = f.metadata().expect("cannot get file metadata");
+
+                // check if file length is correct and if not (file is new)
+                // pre-allocate the storage for blocks
+                if meta.len() != (BLOCKS_PER_FILE * BLOCK_SIZE) as u64 {
+                    f.write_all(&[0u8; BLOCKS_PER_FILE * BLOCK_SIZE]).expect("cannot pre-allocate file");
+                    f.sync_all().expect("cannot sync pre-allocated data to disk");
+                }
 
                 entry.insert(f)
             }
@@ -427,20 +433,20 @@ enum FsyncPolicy {
     Never,
 }
 
-struct TimeSource {
+struct Clock {
     last_timestamp: Duration,
 }
 
-impl TimeSource {
+impl Clock {
     pub fn new() -> Self {
-        TimeSource {
+        Clock {
             last_timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .expect("cannot initialize initial_timestamp")
         }
     }
 
-    pub fn get_timestamp(&mut self) -> u64 {
+    pub fn now(&mut self) -> u64 {
         self.last_timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or(self.last_timestamp);
@@ -452,7 +458,7 @@ struct Server {
     series: HashMap<String, Series>,
     block_cache: BlockCache,
     block_io: BlockIO,
-    time_source: TimeSource,
+    time_source: Clock,
 }
 
 impl Server {
@@ -465,7 +471,7 @@ impl Server {
                 fsync_policy,
                 open_files: Default::default(),
             },
-            time_source: TimeSource::new(),
+            time_source: Clock::new(),
         }
     }
 
@@ -498,7 +504,7 @@ impl Server {
         let mut series = self.series.get_mut(series).unwrap();
 
         // compute the data we are going to write to some block
-        let current_timestamp = self.time_source.get_timestamp();
+        let current_timestamp = self.time_source.now();
         let encoded = F32::encode(current_timestamp, value, &mut series.blocks_info.encoder_state);
 
         // decide and return the block we should write data to.
