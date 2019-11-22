@@ -921,8 +921,8 @@ pub mod server {
         /// considered open from one or both sides.
         pub fn retrieve_points(&mut self,
                                series_name: &str,
-                               from: Option<Timestamp>,
-                               to: Option<Timestamp>) -> Vec<Point<V>> {
+                               _from: Option<Timestamp>,
+                               _to: Option<Timestamp>) -> Vec<Point<V>> {
             let mut points = vec![];
             let series = self.series
                 .get_mut(series_name)
