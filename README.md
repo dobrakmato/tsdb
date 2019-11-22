@@ -7,7 +7,7 @@ Features:
 - [ ] multi-threaded
 - [ ] query cache
 - [ ] B-Tree index
-- [ ] one scalar per data-point
+- [x] one scalar per data-point
 - [ ] aggregate functions
 - [ ] `WHERE` on timestamp
 - [ ] `WHERE` on value
