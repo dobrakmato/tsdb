@@ -1,5 +1,5 @@
 use crate::engine::{Timestamp, Schema, Point};
-use crate::engine::server::Server;
+use crate::engine::server::{Server, SimpleServer};
 use std::fmt::Display;
 use static_assertions::_core::fmt::{Formatter, Error};
 use std::ops::{AddAssign, Sub, Div};

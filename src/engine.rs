@@ -784,6 +784,11 @@ pub mod server {
         /// Creates new instance of Block loader with specified
         /// storage path, block cache capacity and sync policy for writing.
         pub fn new(storage: PathBuf, cache_capacity: usize, sync_policy: SyncPolicy) -> Self {
+            if !storage.exists() {
+                std::fs::create_dir_all(&storage)
+                    .expect("cannot create storage directory");
+            }
+
             BlockLoader {
                 cache: Cache::with_capacity(cache_capacity),
                 io: BlockIO::new(storage, sync_policy),
@@ -871,9 +876,17 @@ pub mod server {
                 blocks: BlockLoader::new(storage, cache_capacity, sync_policy),
             }
         }
+    }
 
+    pub trait SimpleServer<V> {
+        fn create_series(&mut self, name: &str);
+        fn insert_point(&mut self, series_name: &str, value: V);
+        fn retrieve_points(&mut self, series_name: &str, from: Option<Timestamp>, to: Option<Timestamp>) -> Vec<Point<V>>;
+    }
+
+    impl<S, V> SimpleServer<V> for Server<S, V> where S: Schema<V> {
         /// Creates a new series object.
-        pub fn create_series(&mut self, name: &str) {
+        fn create_series(&mut self, name: &str) {
             let series_id = self.last_series_id;
             let index_file = self.storage.join(format!("{}.idx", series_id));
             let index = TimestampIndex::create_or_load(&index_file, self.sync_policy)
@@ -891,7 +904,7 @@ pub mod server {
         }
 
         /// Inserts specified point into the specified Series object.
-        pub fn insert_point(&mut self, series_name: &str, value: V) {
+        fn insert_point(&mut self, series_name: &str, value: V) {
             let mut series = self.series
                 .get_mut(series_name)
                 .unwrap();
@@ -939,10 +952,10 @@ pub mod server {
         /// Retrieves all data points that happened between `from` and `to`
         /// parameters. If the parameters are empty (`None`) the range is
         /// considered open from one or both sides.
-        pub fn retrieve_points(&mut self,
-                               series_name: &str,
-                               _from: Option<Timestamp>,
-                               _to: Option<Timestamp>) -> Vec<Point<V>> {
+        fn retrieve_points(&mut self,
+                           series_name: &str,
+                           _from: Option<Timestamp>,
+                           _to: Option<Timestamp>) -> Vec<Point<V>> {
             let mut points = vec![];
             let series = self.series
                 .get_mut(series_name)

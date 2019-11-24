@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::time::Instant;
-use tsdb::engine::server::Server;
+use tsdb::engine::server::{Server, SimpleServer};
 use tsdb::engine::f32::F32;
 use tsdb::engine::io::SyncPolicy;
 
