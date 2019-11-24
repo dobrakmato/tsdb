@@ -1,8 +1,8 @@
-use tsdb::server::Server;
-use tsdb::f32::F32;
-use tsdb::io::SyncPolicy;
 use std::path::PathBuf;
 use std::time::Instant;
+use tsdb::engine::server::Server;
+use tsdb::engine::f32::F32;
+use tsdb::engine::io::SyncPolicy;
 
 fn main() {
     let mut s: Server<F32, f32> = Server::new(
@@ -21,9 +21,10 @@ fn main() {
     });
 
     let pts = s.retrieve_points("default", None, None);
-    println!("{:#?}", &pts[0..10]);
+    println!("{:#?}", &pts[0..1]);
 }
 
+#[inline]
 fn measure<F: FnOnce() -> ()>(label: &str, f: F) {
     let start = Instant::now();
     f();
