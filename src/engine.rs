@@ -110,7 +110,7 @@ pub mod f32 {
 
     #[cfg(test)]
     mod tests {
-        use crate::engine::{Point, Schema};
+        use crate::engine::{Point, Schema, Timestamp, Decoder};
         use crate::engine::f32::{F32Enc, F32Dec, F32};
 
         #[test]
@@ -119,7 +119,7 @@ pub mod f32 {
             let point2 = Point { timestamp: 120.into(), value: 10.0 };
 
             let mut enc_state = F32Enc::default();
-            let mut dec_state = F32Dec::default();
+            let mut dec_state = F32Dec::new(Timestamp(0));
 
             let result1 = F32::encode(&mut enc_state, point1);
             let result2 = F32::encode(&mut enc_state, point2);
