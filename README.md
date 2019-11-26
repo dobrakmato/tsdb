@@ -7,6 +7,7 @@ Features:
 - [ ] multi-threaded
 - [ ] query cache
 - [ ] B-Tree index
+- [x] sorted array index (bin-search)
 - [x] one scalar per data-point
 - [ ] aggregate functions
 - [ ] `WHERE` on timestamp
@@ -17,6 +18,8 @@ Features:
 - [ ] multiple scalars (tuples) per data-point
 - [ ] old data downsampling
 - [ ] old data deletion
+- [ ] auth: name & password
+- [ ] ssl / tls
 
 ### ACID
 

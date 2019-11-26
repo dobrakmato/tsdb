@@ -672,20 +672,20 @@ pub mod index {
             &self.data.get(block_id).unwrap().max
         }
 
-        pub fn find_block(&self, timestamp: &Timestamp) -> Option<usize> {
+        pub fn find_block(&self, timestamp: &Timestamp) -> usize {
             match self.data.binary_search_by(|x| x.max.0.cmp(&timestamp.0)) {
                 Ok(mut t) => {
                     if t == 0 {
-                        return Some(t);
+                        return t;
                     }
                     let t_orig_max = self.get_max(t);
 
                     while t > 0 && self.get_max(t - 1) == t_orig_max {
                         t -= 1;
                     }
-                    Some(t)
+                    t
                 }
-                Err(t) => Some(t)
+                Err(t) => t
             }
         }
 
@@ -762,15 +762,15 @@ pub mod index {
             idx.set_max(5, Timestamp(21));
             idx.set_max(6, Timestamp(50));
 
-            assert_eq!(idx.find_block(&Timestamp(0)), Some(0));
-            assert_eq!(idx.find_block(&Timestamp(5)), Some(0));
-            assert_eq!(idx.find_block(&Timestamp(6)), Some(1));
-            assert_eq!(idx.find_block(&Timestamp(18)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(19)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(20)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(21)), Some(5));
-            assert_eq!(idx.find_block(&Timestamp(25)), Some(6));
-            assert_eq!(idx.find_block(&Timestamp(1000)), Some(7));
+            assert_eq!(idx.find_block(&Timestamp(0)), (0));
+            assert_eq!(idx.find_block(&Timestamp(5)), (0));
+            assert_eq!(idx.find_block(&Timestamp(6)), (1));
+            assert_eq!(idx.find_block(&Timestamp(18)), (3));
+            assert_eq!(idx.find_block(&Timestamp(19)), (3));
+            assert_eq!(idx.find_block(&Timestamp(20)), (3));
+            assert_eq!(idx.find_block(&Timestamp(21)), (5));
+            assert_eq!(idx.find_block(&Timestamp(25)), (6));
+            assert_eq!(idx.find_block(&Timestamp(1000)), (7));
         }
 
         #[test]
@@ -789,14 +789,14 @@ pub mod index {
             idx.set_max(3, Timestamp(10));
             idx.set_max(4, Timestamp(10));
 
-            assert_eq!(idx.find_block(&Timestamp(0)), Some(0));
-            assert_eq!(idx.find_block(&Timestamp(5)), Some(0));
-            assert_eq!(idx.find_block(&Timestamp(6)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(7)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(8)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(9)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(10)), Some(3));
-            assert_eq!(idx.find_block(&Timestamp(11)), Some(5));
+            assert_eq!(idx.find_block(&Timestamp(0)), (0));
+            assert_eq!(idx.find_block(&Timestamp(5)), (0));
+            assert_eq!(idx.find_block(&Timestamp(6)), (3));
+            assert_eq!(idx.find_block(&Timestamp(7)), (3));
+            assert_eq!(idx.find_block(&Timestamp(8)), (3));
+            assert_eq!(idx.find_block(&Timestamp(9)), (3));
+            assert_eq!(idx.find_block(&Timestamp(10)), (3));
+            assert_eq!(idx.find_block(&Timestamp(11)), (5));
         }
     }
 }
@@ -1060,14 +1060,16 @@ pub mod server {
 
             let start_block = from
                 .map(|x| series.timestamp_index.find_block(&x))
-                .flatten()
                 .unwrap_or(0);
             let end_block = to
                 .map(|x| series.timestamp_index.find_block(&x))
-                .flatten()
                 .unwrap_or(series.blocks - 1);
 
-            let min_timestamp = Timestamp(0); // todo: min_timestamp for start_block
+            // first timestamp in block 0 is absolute and not relative
+            let min_timestamp = if start_block == 0 { Timestamp(0) } else {
+                *series.timestamp_index.get_min(start_block)
+            };
+
             let mut dec_state = S::DecState::new(min_timestamp);
             let mut read_points = 0usize;
 
