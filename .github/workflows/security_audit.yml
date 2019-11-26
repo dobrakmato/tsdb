@@ -9,6 +9,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v1
+      - name: Install latest nightly
+          uses: actions-rs/toolchain@v1
+          with:
+            toolchain: nightly
+            profile: minimal
+            override: true
       - uses: actions-rs/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
