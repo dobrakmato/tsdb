@@ -334,7 +334,7 @@ pub mod io {
     use std::collections::HashMap;
     use std::fs::{File, OpenOptions};
     use std::collections::hash_map::Entry;
-    use std::io::{Write, Seek, SeekFrom, Read, Error};
+    use std::io::{Write, Seek, SeekFrom, Read, Error, ErrorKind};
 
     #[derive(Copy, Clone)]
     pub enum SyncPolicy {
@@ -344,9 +344,12 @@ pub mod io {
 
     struct StorageFile {
         file: File,
+        length: usize,
     }
 
     impl StorageFile {
+        const INITIAL_ALLOCATION_SIZE: usize = 2 * BLOCK_SIZE;
+
         /// Creates a StorageFile by creation a file on the disk and allocates
         /// the storage by filling the file with zeros.
         fn allocate(path: &Path) -> Result<StorageFile, Error> {
@@ -356,9 +359,10 @@ pub mod io {
                 .create_new(true)
                 .open(path)?;
 
-            file.write_all(&[0u8; BLOCKS_PER_FILE * BLOCK_SIZE])?;
+            // allocate space for some blocks
+            file.write_all(&[0u8; StorageFile::INITIAL_ALLOCATION_SIZE])?;
 
-            Ok(StorageFile { file })
+            Ok(StorageFile { file, length: StorageFile::INITIAL_ALLOCATION_SIZE })
         }
 
         /// Opens the file on the disk and returns a new StorageFile instance
@@ -369,13 +373,40 @@ pub mod io {
                 .read(true)
                 .open(path)?;
 
-            Ok(StorageFile { file })
+            let metadata = file.metadata()?;
+
+            if (metadata.len() % BLOCK_SIZE as u64) != 0 {
+                return Err(Error::new(ErrorKind::Other, "File length is not multiple of BLOCK_SIZE!"));
+            }
+
+            Ok(StorageFile { file, length: metadata.len() as usize })
         }
 
+        fn ensure_file_is_large_enough(&mut self, spec: &BlockSpec) -> Result<(), Error> {
+            let start = spec.starting_pos_in_file();
+
+            // if the highest index in the file is smaller than
+            // the starting position of this block, we must allocate the data
+            if self.length - 1 < start {
+                self.file.seek(SeekFrom::End(0))?;
+
+                while self.length - 1 < start {
+                    self.file.write_all(&[0u8; BLOCK_SIZE])?;
+                    self.length += BLOCK_SIZE;
+                }
+            }
+
+            Ok(())
+        }
 
         /// Loads data for block specified by BlockSpec into passed in
         /// mutable Block storage.
-        fn load_into(&mut self, spec: &BlockSpec, block: &mut Block) -> Result<(), Error> {
+        ///
+        /// It the file currently does not contain specified Block the space
+        /// needed to store the block is allocated.
+        fn read_into(&mut self, spec: &BlockSpec, block: &mut Block) -> Result<(), Error> {
+            self.ensure_file_is_large_enough(spec)?;
+
             let seek = SeekFrom::Start(spec.starting_pos_in_file() as u64);
             self.file.seek(seek)?;
             self.file.read_exact(block.as_slice_mut())
@@ -404,7 +435,7 @@ pub mod io {
         storage: PathBuf,
     }
 
-    const BLOCKS_PER_FILE: usize = 2048;
+    const BLOCKS_PER_FILE: usize = 8192;
 
     impl BlockSpec {
         /// Returns file id this block resides in. The code in this function
@@ -467,7 +498,7 @@ pub mod io {
             let mut block = Block::default();
 
             self.create_or_load_file(spec)
-                .load_into(&spec, &mut block)
+                .read_into(&spec, &mut block)
                 .expect("load block failed");
 
             block
