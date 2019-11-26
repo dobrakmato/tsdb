@@ -540,10 +540,15 @@ pub mod index {
     use std::path::Path;
     use std::io::{Error, Read, Seek, SeekFrom, Write};
 
+    struct MinMax {
+        min: Timestamp,
+        max: Timestamp,
+    }
+
     pub struct TimestampIndex {
         file: File,
         sync_policy: SyncPolicy,
-        data: Vec<Timestamp>,
+        data: Vec<MinMax>,
         dirty_from_element_idx: usize,
     }
 
@@ -557,7 +562,7 @@ pub mod index {
                 .open(path)?;
 
             let metadata = file.metadata()?;
-            let elements = metadata.len() as usize / std::mem::size_of::<Timestamp>();
+            let elements = metadata.len() as usize / std::mem::size_of::<MinMax>();
             let mut data = Vec::with_capacity(elements);
 
             // todo: check if unsafe is safe?
@@ -565,7 +570,7 @@ pub mod index {
             // the data into the slice.
             let ptr = data.as_mut_ptr() as *mut u8;
             let bytes = unsafe {
-                std::slice::from_raw_parts_mut(ptr, elements * std::mem::size_of::<Timestamp>())
+                std::slice::from_raw_parts_mut(ptr, elements * std::mem::size_of::<MinMax>())
             };
 
             file.read_exact(bytes)?;
@@ -623,7 +628,7 @@ pub mod index {
                 if self.data.capacity() == self.data.len() {
                     self.data.reserve(8);
                 }
-                self.data.push(Timestamp(0));
+                self.data.push(MinMax { min: Timestamp(0), max: Timestamp(0) });
             }
         }
 
@@ -635,27 +640,57 @@ pub mod index {
         /// # Panics
         /// This functions panic when `block_id` is larger then last
         /// `block_id + 1`.
-        pub fn set_max(&mut self, block_id: usize, timestamp: Timestamp) {
+        pub fn set_min(&mut self, block_id: usize, timestamp: Timestamp) {
             self.ensure_vec_has_enough_elements(block_id);
             if let Some(t) = self.data.get_mut(block_id) {
-                *t = timestamp
+                t.min = timestamp
             };
             self.dirty_from_element_idx = self.dirty_from_element_idx.min(block_id);
         }
 
+        /// Sets the maximum timestamp for specified block.
+        ///
+        /// This function is safe to call only with `block_id` less or equal
+        /// to previous `block_id + 1`.
+        ///
+        /// # Panics
+        /// This functions panic when `block_id` is larger then last
+        /// `block_id + 1`.
+        pub fn set_max(&mut self, block_id: usize, timestamp: Timestamp) {
+            self.ensure_vec_has_enough_elements(block_id);
+            if let Some(t) = self.data.get_mut(block_id) {
+                t.max = timestamp
+            };
+            self.dirty_from_element_idx = self.dirty_from_element_idx.min(block_id);
+        }
+
+        pub fn get_min(&self, block_id: usize) -> &Timestamp {
+            &self.data.get(block_id).unwrap().min
+        }
+
         pub fn get_max(&self, block_id: usize) -> &Timestamp {
-            self.data.get(block_id).unwrap()
+            &self.data.get(block_id).unwrap().max
         }
 
         pub fn find_block(&self, timestamp: &Timestamp) -> Option<usize> {
-            match self.data.binary_search_by(|x| x.0.cmp(&timestamp.0)) {
-                Ok(t) => Some(t),
+            match self.data.binary_search_by(|x| x.max.0.cmp(&timestamp.0)) {
+                Ok(mut t) => {
+                    if t == 0 {
+                        return Some(t);
+                    }
+                    let t_orig_max = self.get_max(t);
+
+                    while t > 0 && self.get_max(t - 1) == t_orig_max {
+                        t -= 1;
+                    }
+                    Some(t)
+                }
                 Err(t) => Some(t)
             }
         }
 
         pub fn write_dirty_part(&mut self) {
-            let dirty_from_bytes = self.dirty_from_element_idx * std::mem::size_of::<Timestamp>();
+            let dirty_from_bytes = self.dirty_from_element_idx * std::mem::size_of::<MinMax>();
 
             self.file.seek(SeekFrom::Start(dirty_from_bytes as u64))
                 .expect("cannot seek in index file");
@@ -666,7 +701,7 @@ pub mod index {
             let elements = self.data.len();
             let ptr = self.data.as_ptr() as *const u8;
             let bytes = unsafe {
-                std::slice::from_raw_parts(ptr, elements * std::mem::size_of::<Timestamp>())
+                std::slice::from_raw_parts(ptr, elements * std::mem::size_of::<MinMax>())
             };
 
             self.file.write(&bytes[dirty_from_bytes..])
@@ -696,15 +731,15 @@ pub mod index {
                 dirty_from_element_idx: 0,
             };
 
-            idx.set_max(0, Timestamp(5));
-            idx.set_max(1, Timestamp(10));
-            idx.set_max(2, Timestamp(16));
-            idx.set_max(3, Timestamp(20));
-            idx.set_max(4, Timestamp(21));
-            idx.set_max(5, Timestamp(50));
+            idx.set_min(0, Timestamp(5));
+            idx.set_min(1, Timestamp(10));
+            idx.set_min(2, Timestamp(16));
+            idx.set_min(3, Timestamp(20));
+            idx.set_min(4, Timestamp(21));
+            idx.set_min(5, Timestamp(50));
 
-            assert_eq!(*idx.get_max(0), Timestamp(5));
-            assert_eq!(*idx.get_max(4), Timestamp(21));
+            assert_eq!(*idx.get_min(0), Timestamp(5));
+            assert_eq!(*idx.get_min(4), Timestamp(21));
         }
 
         #[test]
@@ -716,6 +751,8 @@ pub mod index {
                 data: vec![],
                 dirty_from_element_idx: 0,
             };
+
+            // 5 | 10 | 16 | 20 | 20 | 21 | 50
 
             idx.set_max(0, Timestamp(5));
             idx.set_max(1, Timestamp(10));
@@ -733,7 +770,33 @@ pub mod index {
             assert_eq!(idx.find_block(&Timestamp(20)), Some(3));
             assert_eq!(idx.find_block(&Timestamp(21)), Some(5));
             assert_eq!(idx.find_block(&Timestamp(25)), Some(6));
-            assert_eq!(idx.find_block(&Timestamp(1000)), None);
+            assert_eq!(idx.find_block(&Timestamp(1000)), Some(7));
+        }
+
+        #[test]
+        fn test_binary_search_same() {
+            let dir = TempDir::new("tsdb").unwrap();
+            let mut idx = TimestampIndex {
+                file: File::create(dir.path().join("test_binary_search_same")).unwrap(),
+                sync_policy: SyncPolicy::Never,
+                data: vec![],
+                dirty_from_element_idx: 0,
+            };
+
+            idx.set_max(0, Timestamp(5));
+            idx.set_max(1, Timestamp(5));
+            idx.set_max(2, Timestamp(5));
+            idx.set_max(3, Timestamp(10));
+            idx.set_max(4, Timestamp(10));
+
+            assert_eq!(idx.find_block(&Timestamp(0)), Some(0));
+            assert_eq!(idx.find_block(&Timestamp(5)), Some(0));
+            assert_eq!(idx.find_block(&Timestamp(6)), Some(3));
+            assert_eq!(idx.find_block(&Timestamp(7)), Some(3));
+            assert_eq!(idx.find_block(&Timestamp(8)), Some(3));
+            assert_eq!(idx.find_block(&Timestamp(9)), Some(3));
+            assert_eq!(idx.find_block(&Timestamp(10)), Some(3));
+            assert_eq!(idx.find_block(&Timestamp(11)), Some(5));
         }
     }
 }
@@ -958,6 +1021,7 @@ pub mod server {
                     self.blocks.remove(&last_block_spec);
 
                     series.timestamp_index.set_max(last_block_spec.block_id, series.last_timestamp);
+                    series.timestamp_index.set_min(last_block_spec.block_id + 1, timestamp);
                     series.timestamp_index.write_dirty_part();
                     series.blocks += 1;
                     series.last_block_used_bytes = 0;
@@ -971,11 +1035,13 @@ pub mod server {
                 }
             };
 
+            let block_spec = series.last_block_spec();
             self.blocks.acquire_unevictable_then_write(
-                series.last_block_spec(),
+                block_spec,
                 series.last_block_used_bytes,
                 fn_write_encoded,
             );
+            series.timestamp_index.set_max(block_spec.block_id, timestamp);
             series.last_timestamp = timestamp;
             series.last_block_used_bytes += encoded.length;
         }
@@ -985,19 +1051,25 @@ pub mod server {
         /// considered open from one or both sides.
         fn retrieve_points(&mut self,
                            series_name: &str,
-                           _from: Option<Timestamp>,
-                           _to: Option<Timestamp>) -> Vec<Point<V>> {
+                           from: Option<Timestamp>,
+                           to: Option<Timestamp>) -> Vec<Point<V>> {
             let mut points = vec![];
             let series = self.series
                 .get_mut(series_name)
                 .unwrap();
 
-            // todo: load these from index
-            let start_block = 0;
-            let end_block = series.blocks - 1;
+            let start_block = from
+                .map(|x| series.timestamp_index.find_block(&x))
+                .flatten()
+                .unwrap_or(0);
+            let end_block = to
+                .map(|x| series.timestamp_index.find_block(&x))
+                .flatten()
+                .unwrap_or(series.blocks - 1);
 
             let min_timestamp = Timestamp(0); // todo: min_timestamp for start_block
             let mut dec_state = S::DecState::new(min_timestamp);
+            let mut read_points = 0usize;
 
             for block_id in start_block..=end_block {
                 let spec = series.create_block_spec(block_id);
@@ -1008,11 +1080,15 @@ pub mod server {
                     let offset_buff = &block.data[read_bytes..];
                     let (point, rb) = S::decode(&mut dec_state, offset_buff);
 
+                    read_points += 1;
                     points.push(point);
 
                     read_bytes += rb
                 }
             }
+
+            println!("read_blocks={}\tread_points={}\tstart={}\tend={}", end_block - start_block,
+                     read_points, start_block, end_block);
 
             points
         }
