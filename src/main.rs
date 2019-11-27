@@ -5,6 +5,8 @@ use tsdb::engine::f32::F32;
 use tsdb::engine::io::SyncPolicy;
 
 fn main() {
+    simple_logger::init_with_level(log::Level::Debug).unwrap();
+
     let mut s: Server<F32, f32> = Server::new(
         PathBuf::from("./storage/"),
         1024,

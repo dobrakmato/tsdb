@@ -196,7 +196,7 @@ pub mod block {
     }
 
     /// Type that represents a "handle" to potentially unloaded Block.
-    #[derive(Hash, Eq, PartialEq, Copy, Clone)]
+    #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug)]
     pub struct BlockSpec {
         pub series_id: usize,
         pub block_id: usize,
@@ -204,8 +204,10 @@ pub mod block {
 }
 
 pub mod cache {
+    use log::trace;
     use std::collections::HashMap;
     use std::hash::Hash;
+    use std::fmt::Debug;
 
     /// An LRU cache backed by HashMap which owns the stored data. The
     /// least recently used algorithm is implemented using runtime
@@ -216,7 +218,7 @@ pub mod cache {
         lru_idx: usize,
     }
 
-    impl<K, V> Cache<K, V> where K: Hash + Eq + Copy {
+    impl<K, V> Cache<K, V> where K: Hash + Eq + Copy + Debug {
         pub fn with_capacity(capacity: usize) -> Self {
             Cache {
                 items: HashMap::with_capacity(capacity),
@@ -251,11 +253,13 @@ pub mod cache {
         /// Elements inserted with this method are not counted towards the
         /// cache capacity so it's possible to have more then `capacity`
         /// elements in the cache.
-        pub fn insert_unevictable(&mut self, key: K, value: V) {
+        pub fn insert_unevictable(&mut self, key: K, value: V) where K: Debug {
+            trace!("Inserted unevictable entry: {:?}", &key);
             self.items.insert(key, value);
         }
 
-        pub fn remove(&mut self, key: &K) {
+        pub fn remove(&mut self, key: &K) where K: Debug {
+            trace!("Removed entry: {:?}", key);
             self.items.remove(key);
         }
 
@@ -329,6 +333,7 @@ pub mod cache {
 }
 
 pub mod io {
+    use log::debug;
     use std::path::{Path, PathBuf};
     use crate::engine::block::{Block, BlockSpec, BLOCK_SIZE};
     use std::collections::HashMap;
@@ -336,7 +341,7 @@ pub mod io {
     use std::collections::hash_map::Entry;
     use std::io::{Write, Seek, SeekFrom, Read, Error, ErrorKind};
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     pub enum SyncPolicy {
         Immediate,
         Never,
@@ -352,7 +357,7 @@ pub mod io {
 
         /// Creates a StorageFile by creation a file on the disk and allocates
         /// the storage by filling the file with zeros.
-        fn allocate(path: &Path) -> Result<StorageFile, Error> {
+        fn allocate_new(path: &Path) -> Result<StorageFile, Error> {
             let mut file = OpenOptions::new()
                 .write(true)
                 .read(true)
@@ -478,9 +483,11 @@ pub mod io {
                 Entry::Vacant(t) => {
                     let file_path = spec.determine_file_path(&self.storage);
                     let storage_file = if file_path.exists() {
+                        debug!("Loading storage file: {}", file_path.to_string_lossy());
                         StorageFile::open(&file_path).expect("open block failed")
                     } else {
-                        StorageFile::allocate(&file_path).expect("create block failed")
+                        debug!("Creating storage file: {}", file_path.to_string_lossy());
+                        StorageFile::allocate_new(&file_path).expect("create block failed")
                     };
 
                     t.insert(storage_file)
@@ -524,7 +531,8 @@ pub mod io {
                 SyncPolicy::Never => false,
             };
             let file = self.create_or_load_file(spec);
-            file.write(&spec, block, dirty_from).expect("write block partially failed");
+            file.write(&spec, block, dirty_from)
+                .expect("write block partially failed");
 
             if should_sync {
                 file.sync().expect("sync failed")
@@ -534,6 +542,7 @@ pub mod io {
 }
 
 pub mod index {
+    use log::debug;
     use crate::engine::Timestamp;
     use std::fs::{File, OpenOptions};
     use crate::engine::io::SyncPolicy;
@@ -565,6 +574,7 @@ pub mod index {
             let elements = metadata.len() as usize / std::mem::size_of::<MinMax>();
             let mut data = Vec::with_capacity(elements);
 
+            debug!("Loading index from: {} ({} elements)", path.to_string_lossy(), elements);
             // todo: check if unsafe is safe?
             // safe: we take Vec's allocation, create a slice of u8 from it, read
             // the data into the slice.
@@ -586,6 +596,7 @@ pub mod index {
         /// Creates a new empty index file and returns TimestampIndex
         /// associated with it.
         fn create(path: &Path, sync_policy: SyncPolicy) -> Result<TimestampIndex, Error> {
+            debug!("Creating new index at: {}", path.to_string_lossy());
             let file = OpenOptions::new()
                 .write(true)
                 .read(true)
@@ -831,6 +842,7 @@ pub mod clock {
 }
 
 pub mod server {
+    use log::debug;
     use crate::engine::{Schema, Timestamp, Point};
     use crate::engine::index::TimestampIndex;
     use crate::engine::block::{BlockSpec, BLOCK_TAIL_SIZE, BLOCK_SIZE, Block};
@@ -879,10 +891,13 @@ pub mod server {
         /// storage path, block cache capacity and sync policy for writing.
         pub fn new(storage: PathBuf, cache_capacity: usize, sync_policy: SyncPolicy) -> Self {
             if !storage.exists() {
+                debug!("Storage dir does not exists - creating... {}", storage.to_string_lossy());
                 std::fs::create_dir_all(&storage)
                     .expect("cannot create storage directory");
             }
 
+            debug!("Creating BlockLoader storage={} cache_capacity={} sync_policy={:?}",
+                   storage.to_string_lossy(), cache_capacity, sync_policy);
             BlockLoader {
                 cache: Cache::with_capacity(cache_capacity),
                 io: BlockIO::new(storage, sync_policy),
@@ -945,6 +960,21 @@ pub mod server {
                 .expect("block is not in cache after we loaded it!");
             f(b);
             self.io.write_block_partially(&spec, b, dirty_from);
+        }
+
+        /// Acquires mutable reference to Block specified by `spec` parameter,
+        /// calls the specified closure with it.
+        pub fn acquire_unevictable<F: (FnOnce(&mut Block) -> ())>(&mut self,
+                                                                  spec: BlockSpec,
+                                                                  f: F) {
+            if !self.cache.contains_key(&spec) {
+                self.cache.insert_unevictable(spec, self.io.create_or_load_block(&spec));
+            }
+
+            let b = self.cache
+                .get_mut(&spec)
+                .expect("block is not in cache after we loaded it!");
+            f(b);
         }
     }
 
@@ -1033,6 +1063,7 @@ pub mod server {
             let index = TimestampIndex::create_or_load(&index_file, self.sync_policy)
                 .unwrap();
 
+            debug!("Creating new series ID {} ('{}')", series_id, name);
             self.series.insert(name.to_string(), Series {
                 id: series_id,
                 enc_state: Default::default(),
@@ -1083,7 +1114,6 @@ pub mod server {
             };
 
             let mut dec_state = S::DecState::new(min_timestamp);
-            let mut read_points = 0usize;
 
             for block_id in start_block..=end_block {
                 let spec = series.create_block_spec(block_id);
@@ -1094,8 +1124,6 @@ pub mod server {
                 while read_bytes < written_bytes {
                     let offset_buff = &block.data[read_bytes..];
                     let (point, rb) = S::decode(&mut dec_state, offset_buff);
-
-                    read_points += 1;
 
                     if to.is_some() && to.unwrap().0 < point.timestamp.0 {
                         break;
