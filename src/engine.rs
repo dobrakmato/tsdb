@@ -970,40 +970,12 @@ pub mod server {
                 blocks: BlockLoader::new(storage, cache_capacity, sync_policy),
             }
         }
-    }
 
-    pub trait SimpleServer<V> {
-        fn create_series(&mut self, name: &str);
-        fn insert_point(&mut self, series_name: &str, value: V);
-        fn retrieve_points(&mut self, series_name: &str, from: Option<Timestamp>, to: Option<Timestamp>) -> Vec<Point<V>>;
-    }
-
-    impl<S, V> SimpleServer<V> for Server<S, V> where S: Schema<V> {
-        /// Creates a new series object.
-        fn create_series(&mut self, name: &str) {
-            let series_id = self.last_series_id;
-            let index_file = self.storage.join(format!("{}.idx", series_id));
-            let index = TimestampIndex::create_or_load(&index_file, self.sync_policy)
-                .unwrap();
-
-            self.series.insert(name.to_string(), Series {
-                id: series_id,
-                enc_state: Default::default(),
-                timestamp_index: index,
-                blocks: 1,
-                last_block_used_bytes: 0,
-                last_timestamp: Timestamp(0),
-            });
-            self.last_series_id += 1;
-        }
-
-        /// Inserts specified point into the specified Series object.
-        fn insert_point(&mut self, series_name: &str, value: V) {
+        fn insert_point_at(&mut self, series_name: &str, value: V, timestamp: Timestamp) {
             let mut series = self.series
                 .get_mut(series_name)
                 .unwrap();
 
-            let timestamp = self.clock.now();
             let point = Point { timestamp, value };
             let encoded = S::encode(&mut series.enc_state, point);
             {
@@ -1045,6 +1017,38 @@ pub mod server {
             series.last_timestamp = timestamp;
             series.last_block_used_bytes += encoded.length;
         }
+    }
+
+    pub trait SimpleServer<V> {
+        fn create_series(&mut self, name: &str);
+        fn insert_point(&mut self, series_name: &str, value: V);
+        fn retrieve_points(&mut self, series_name: &str, from: Option<Timestamp>, to: Option<Timestamp>) -> Vec<Point<V>>;
+    }
+
+    impl<S, V> SimpleServer<V> for Server<S, V> where S: Schema<V> {
+        /// Creates a new series object.
+        fn create_series(&mut self, name: &str) {
+            let series_id = self.last_series_id;
+            let index_file = self.storage.join(format!("{}.idx", series_id));
+            let index = TimestampIndex::create_or_load(&index_file, self.sync_policy)
+                .unwrap();
+
+            self.series.insert(name.to_string(), Series {
+                id: series_id,
+                enc_state: Default::default(),
+                timestamp_index: index,
+                blocks: 1,
+                last_block_used_bytes: 0,
+                last_timestamp: Timestamp(0),
+            });
+            self.last_series_id += 1;
+        }
+
+        /// Inserts specified point into the specified Series object.
+        fn insert_point(&mut self, series_name: &str, value: V) {
+            let timestamp = self.clock.now();
+            self.insert_point_at(series_name, value, timestamp)
+        }
 
         /// Retrieves all data points that happened between `from` and `to`
         /// parameters. If the parameters are empty (`None`) the range is
@@ -1059,10 +1063,18 @@ pub mod server {
                 .unwrap();
 
             let start_block = from
+                .or_else(|| Some(Timestamp(0)))
                 .map(|x| series.timestamp_index.find_block(&x))
-                .unwrap_or(0);
+                .unwrap();
+
+            // we start at block that does not exists yet -> empty result
+            if start_block > series.blocks - 1 {
+                return vec![];
+            }
+
             let end_block = to
                 .map(|x| series.timestamp_index.find_block(&x))
+                .map(|x| x.min(series.blocks - 1))
                 .unwrap_or(series.blocks - 1);
 
             // first timestamp in block 0 is absolute and not relative
@@ -1078,21 +1090,67 @@ pub mod server {
                 let block = self.blocks.acquire_block(spec);
 
                 let mut read_bytes = 0;
-                while read_bytes < block.data_len() {
+                let written_bytes = series.last_block_used_bytes;
+                while read_bytes < written_bytes {
                     let offset_buff = &block.data[read_bytes..];
                     let (point, rb) = S::decode(&mut dec_state, offset_buff);
 
                     read_points += 1;
-                    points.push(point);
+
+                    if to.is_some() && to.unwrap().0 < point.timestamp.0 {
+                        break;
+                    }
+
+                    if from.is_none() || from.unwrap().0 <= point.timestamp.0 {
+                        points.push(point);
+                    }
 
                     read_bytes += rb
                 }
             }
 
-            println!("read_blocks={}\tread_points={}\tstart={}\tend={}", end_block - start_block,
-                     read_points, start_block, end_block);
-
             points
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::engine::server::{Server, SimpleServer};
+        use crate::engine::f32::F32;
+        use crate::engine::io::SyncPolicy;
+        use tempdir::TempDir;
+        use crate::engine::Timestamp;
+
+        #[test]
+        fn test_simple_commands() {
+            let dir = TempDir::new("test_simple_commands").unwrap();
+            let mut s: Server<F32, f32> = Server::new(
+                dir.path().join("storage/"),
+                1024,
+                SyncPolicy::Never,
+            );
+
+            s.create_series("default");
+            s.insert_point_at("default", 1.0, Timestamp(1));
+            s.insert_point_at("default", 2.0, Timestamp(1));
+            s.insert_point_at("default", 3.0, Timestamp(2));
+            s.insert_point_at("default", 4.0, Timestamp(3));
+            s.insert_point_at("default", 5.0, Timestamp(4));
+            s.insert_point_at("default", 6.0, Timestamp(5));
+            s.insert_point_at("default", 7.0, Timestamp(5));
+            s.insert_point_at("default", 8.0, Timestamp(5));
+            s.insert_point_at("default", 9.0, Timestamp(10));
+            s.insert_point_at("default", 10.0, Timestamp(11));
+
+            assert_eq!(s.retrieve_points("default", None, None).len(), 10);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(500)), None).len(), 0);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(11))).len(), 10);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(500))).len(), 10);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(10))).len(), 9);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(3)), Some(Timestamp(10))).len(), 6);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(5)), Some(Timestamp(5))).len(), 3);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(10)), Some(Timestamp(1))).len(), 0);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(11)), Some(Timestamp(100))).len(), 1);
         }
     }
 }
