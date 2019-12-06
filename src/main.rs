@@ -1,35 +1,20 @@
 use std::path::PathBuf;
-use std::time::Instant;
-use tsdb::engine::server::{Engine, SimpleServer};
 use tsdb::engine::f32::F32;
 use tsdb::engine::io::SyncPolicy;
+use tsdb::server::{Settings, Server};
 
 
 fn main() {
     simple_logger::init_with_level(log::Level::Debug).unwrap();
 
-    let mut s: Engine<F32, f32> = Engine::new(
-        PathBuf::from("./storage/"),
-        1024,
-        SyncPolicy::Never,
-    );
+    let settings = Settings {
+        storage: PathBuf::from("./storage/"),
+        block_cache_capacity: 1024,
+        block_sync_policy: SyncPolicy::Never,
+        index_sync_policy: SyncPolicy::Never,
+        listen: "0.0.0.0:9087".to_string(),
+    };
 
-    s.create_series("default");
-    s.insert_point("default", 3.14);
-
-    measure("insert 50000 records", || {
-        for f in 0..50000 {
-            s.insert_point("default", f as f32);
-        }
-    });
-
-    let pts = s.retrieve_points("default", None, None).ok().unwrap();
-    println!("{:#?}", &pts[0..1]);
-}
-
-#[inline]
-fn measure<F: FnOnce() -> ()>(label: &str, f: F) {
-    let start = Instant::now();
-    f();
-    println!("{} took {}s", label, start.elapsed().as_secs_f32())
+    let mut server = Server::<F32, f32>::new(settings);
+    server.listen();
 }

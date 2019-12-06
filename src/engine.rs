@@ -1212,15 +1212,15 @@ pub mod server {
             s.insert_point_at("default", 9.0, Timestamp(10));
             s.insert_point_at("default", 10.0, Timestamp(11));
 
-            assert_eq!(s.retrieve_points("default", None, None).len(), 10);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(500)), None).len(), 0);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(11))).len(), 10);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(500))).len(), 10);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(10))).len(), 9);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(3)), Some(Timestamp(10))).len(), 6);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(5)), Some(Timestamp(5))).len(), 3);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(10)), Some(Timestamp(1))).len(), 0);
-            assert_eq!(s.retrieve_points("default", Some(Timestamp(11)), Some(Timestamp(100))).len(), 1);
+            assert_eq!(s.retrieve_points("default", None, None).ok().unwrap().len(), 10);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(500)), None).ok().unwrap().len(), 0);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(11))).ok().unwrap().len(), 10);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(500))).ok().unwrap().len(), 10);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(1)), Some(Timestamp(10))).ok().unwrap().len(), 9);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(3)), Some(Timestamp(10))).ok().unwrap().len(), 6);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(5)), Some(Timestamp(5))).ok().unwrap().len(), 3);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(10)), Some(Timestamp(1))).ok().unwrap().len(), 0);
+            assert_eq!(s.retrieve_points("default", Some(Timestamp(11)), Some(Timestamp(100))).ok().unwrap().len(), 1);
         }
     }
 }

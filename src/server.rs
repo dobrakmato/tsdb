@@ -55,26 +55,26 @@ mod protocol {
 
 #[derive(Serialize, Deserialize)]
 pub struct Settings {
-    storage: PathBuf,
-    block_cache_capacity: usize,
-    block_sync_policy: SyncPolicy,
-    index_sync_policy: SyncPolicy,
-    listen: String,
+    pub storage: PathBuf,
+    pub block_cache_capacity: usize,
+    pub block_sync_policy: SyncPolicy,
+    pub index_sync_policy: SyncPolicy,
+    pub listen: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct SeriesData<S, V, T> where S: Schema<V, EncState=T>, T: Default {
+pub struct SeriesData<EncState> {
     id: usize,
     name: String,
-    enc_state: S::EncState,
+    enc_state: EncState,
     blocks: usize,
     last_block_used_bytes: usize,
     last_timestamp: u64,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct ServerData<S, V, T> where S: Schema<V, EncState=T>, T: Default {
-    series: Vec<SeriesData<S, V, T>>,
+pub struct ServerData<EncState> {
+    series: Vec<SeriesData<EncState>>,
     last_series_id: usize,
 }
 
@@ -85,15 +85,24 @@ pub struct Server<S, V> where S: Schema<V> {
 }
 
 impl<S, V, EncState> Server<S, V>
-    where for<'a> S: Schema<V, EncState=EncState> + Deserialize<'a>,
-          for<'a> V: Serialize + Deserialize<'a> + Copy,
-          for<'a> EncState: Serialize + Deserialize<'a> + Default + Clone
+    where S: Schema<V, EncState=EncState>,
+          for<'a> V: Copy + Serialize + Deserialize<'a>,
+          for<'a> EncState: Serialize + Deserialize<'a> + Default
 {
     pub fn new(settings: Settings) -> Self {
-        let reader = std::fs::File::open(settings.storage.join("server.json")).unwrap();
-        let series_data: ServerData<S, V, EncState> = serde_json::from_reader(reader).unwrap();
+        let path = settings.storage.join("server.json");
 
-        let series = series_data.series.into_iter()
+        let server_data: ServerData<EncState> = if path.exists() {
+            let reader = std::fs::File::open(path).unwrap();
+            serde_json::from_reader(reader).unwrap()
+        } else {
+            ServerData {
+                series: vec![],
+                last_series_id: 0,
+            }
+        };
+
+        let series = server_data.series.into_iter()
             .map(|s| {
                 let index_file = settings.storage.join(format!("{}.idx", s.id));
                 let index = TimestampIndex::create_or_load(&index_file, settings.index_sync_policy)
@@ -101,7 +110,7 @@ impl<S, V, EncState> Server<S, V>
 
                 (s.name.to_owned(), Series {
                     id: s.id,
-                    enc_state: s.enc_state.clone(),
+                    enc_state: s.enc_state,
                     timestamp_index: index,
                     blocks: s.blocks,
                     last_block_used_bytes: s.last_block_used_bytes,
@@ -118,9 +127,9 @@ impl<S, V, EncState> Server<S, V>
 
         let engine = Engine {
             clock: Default::default(),
-            storage: Default::default(),
-            sync_policy: SyncPolicy::Immediate,
-            last_series_id: 0,
+            storage: settings.storage.clone(),
+            sync_policy: settings.block_sync_policy,
+            last_series_id: server_data.last_series_id,
             series,
             blocks,
         };
