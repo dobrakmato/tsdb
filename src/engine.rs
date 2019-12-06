@@ -29,7 +29,6 @@ impl Sub<Timestamp> for Timestamp {
     }
 }
 
-
 /// Represents a single data-point with associated Timestamp
 /// in Series object.
 #[derive(Eq, PartialEq, Debug, Copy, Clone)]
@@ -873,12 +872,12 @@ pub mod server {
 
     /// Type that contains metadata about series.
     pub struct Series<S, V> where S: Schema<V> {
-        id: usize,
-        enc_state: S::EncState,
-        timestamp_index: TimestampIndex,
-        blocks: usize,
-        last_block_used_bytes: usize,
-        last_timestamp: Timestamp,
+        pub(crate) id: usize,
+        pub(crate) enc_state: S::EncState,
+        pub(crate) timestamp_index: TimestampIndex,
+        pub(crate) blocks: usize,
+        pub(crate) last_block_used_bytes: usize,
+        pub(crate) last_timestamp: Timestamp,
     }
 
     impl<S, V> Series<S, V> where S: Schema<V> {
@@ -999,12 +998,12 @@ pub mod server {
     /// Type that represents fully-functional storage system for
     /// time-series data.
     pub struct Engine<S, V> where S: Schema<V> {
-        clock: Clock,
-        series: HashMap<String, Series<S, V>>,
-        last_series_id: usize,
-        storage: PathBuf,
-        sync_policy: SyncPolicy,
-        blocks: BlockLoader,
+        pub(crate) clock: Clock,
+        pub(crate) series: HashMap<String, Series<S, V>>,
+        pub(crate) last_series_id: usize,
+        pub(crate) storage: PathBuf,
+        pub(crate) sync_policy: SyncPolicy,
+        pub(crate) blocks: BlockLoader,
     }
 
     impl<S, V> Engine<S, V> where S: Schema<V> {

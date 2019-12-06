@@ -23,7 +23,7 @@ fn main() {
         }
     });
 
-    let pts = s.retrieve_points("default", None, None);
+    let pts = s.retrieve_points("default", None, None).ok().unwrap();
     println!("{:#?}", &pts[0..1]);
 }
 

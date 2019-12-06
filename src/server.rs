@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use log::{info, debug};
 use crate::server::protocol::{Command, Error, Response, Insert, Select, Between};
 use serde::{Deserialize, Serialize};
-use crate::engine::{Schema};
+use crate::engine::Schema;
 use std::io::Write;
 use crate::engine::index::TimestampIndex;
 
@@ -14,20 +14,20 @@ mod protocol {
 
     #[derive(Serialize, Deserialize)]
     pub struct Between {
-        min: Option<u64>,
-        max: Option<u64>,
+        pub min: Option<u64>,
+        pub max: Option<u64>,
     }
 
     #[derive(Serialize, Deserialize)]
     pub struct Select<'a> {
-        from: &'a str,
-        between: Between,
+        pub from: &'a str,
+        pub between: Between,
     }
 
     #[derive(Serialize, Deserialize)]
     pub struct Insert<'a, V> {
-        to: &'a str,
-        value: V,
+        pub to: &'a str,
+        pub value: V,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -57,11 +57,8 @@ mod protocol {
 pub struct Settings {
     storage: PathBuf,
     block_cache_capacity: usize,
-    query_cache_capacity: usize,
     block_sync_policy: SyncPolicy,
-    block_write_policy: SyncPolicy,
     index_sync_policy: SyncPolicy,
-    index_write_policy: SyncPolicy,
     listen: String,
 }
 
@@ -87,24 +84,24 @@ pub struct Server<S, V> where S: Schema<V> {
     tcp: TcpListener,
 }
 
-impl<'a, S, V, T> Server<S, V>
-    where S: Schema<V, EncState=T> + Deserialize<'a>,
-          V: Serialize + Deserialize<'a> + Copy,
-          T: Serialize + Deserialize<'a> + Default
+impl<S, V, EncState> Server<S, V>
+    where for<'a> S: Schema<V, EncState=EncState> + Deserialize<'a>,
+          for<'a> V: Serialize + Deserialize<'a> + Copy,
+          for<'a> EncState: Serialize + Deserialize<'a> + Default + Clone
 {
     pub fn new(settings: Settings) -> Self {
-        let file = std::fs::read_to_string(settings.storage.join("server.json")).unwrap();
-        let series_data: ServerData<S, V, T> = serde_json::from_str(&file).unwrap();
+        let reader = std::fs::File::open(settings.storage.join("server.json")).unwrap();
+        let series_data: ServerData<S, V, EncState> = serde_json::from_reader(reader).unwrap();
 
         let series = series_data.series.into_iter()
             .map(|s| {
                 let index_file = settings.storage.join(format!("{}.idx", s.id));
-                let index = TimestampIndex ::create_or_load(&index_file, settings.index_sync_policy)
+                let index = TimestampIndex::create_or_load(&index_file, settings.index_sync_policy)
                     .unwrap();
 
                 (s.name.to_owned(), Series {
                     id: s.id,
-                    enc_state: s.enc_state,
+                    enc_state: s.enc_state.clone(),
                     timestamp_index: index,
                     blocks: s.blocks,
                     last_block_used_bytes: s.last_block_used_bytes,
@@ -128,7 +125,7 @@ impl<'a, S, V, T> Server<S, V>
             blocks,
         };
 
-        let tcp = TcpListener::bind(settings.listen)
+        let tcp = TcpListener::bind(settings.listen.clone())
             .unwrap();
 
         Server {
@@ -146,7 +143,7 @@ impl<'a, S, V, T> Server<S, V>
             match self.handle_client(&mut stream, &remote) {
                 Ok(response) => {
                     let response = serde_json::to_string(&response).unwrap();
-                    stream.write_all(response.as_bytes());
+                    stream.write_all(response.as_bytes()).unwrap();
                     stream.shutdown(Shutdown::Both).unwrap();
                 }
                 Err(err) => {
@@ -158,13 +155,17 @@ impl<'a, S, V, T> Server<S, V>
         }
     }
 
-    fn handle_client(&mut self, stream: &'a mut std::net::TcpStream, remote: &SocketAddr) -> Result<Response<V>, Error> {
+    fn handle_client(&mut self, stream: &mut std::net::TcpStream, _remote: &SocketAddr) -> Result<Response<V>, Error> {
         // first we need to authenaticate the client
         self.authenticate(stream)?;
 
+        let mut de = serde_json::Deserializer::from_reader(stream);
+        let cmd = Command::deserialize(&mut de)
+            .map_err(|_| Error::InvalidQuery)?;
+
         // then we read command from stream and fulfill it returing
         // the result of the command's execution
-        match self.read_command(stream)? {
+        match cmd {
             Command::Select(Select { from, between }) => {
                 let Between { min, max } = between;
                 let data = self.engine
@@ -172,7 +173,7 @@ impl<'a, S, V, T> Server<S, V>
                                      min.map(|x| x.into()),
                                      max.map(|x| x.into()),
                     )
-                    .map_err(|e| Error::TableNotFound)?
+                    .map_err(|_| Error::TableNotFound)?
                     .iter()
                     .map(|p| (p.timestamp().into(), *p.value()))
                     .collect();
@@ -191,11 +192,6 @@ impl<'a, S, V, T> Server<S, V>
                 Ok(Response::Created)
             }
         }
-    }
-
-    fn read_command<'b>(&mut self, stream: &'b mut TcpStream) -> Result<Command<'b, V>, Error> {
-        let mut de = serde_json::Deserializer::from_reader(stream);
-        Command::deserialize(&mut de).map_err(|x| Error::InvalidQuery)
     }
 
     fn authenticate(&mut self, _stream: &mut TcpStream) -> Result<(), Error> {
