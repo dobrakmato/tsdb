@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use crate::engine::io::SyncPolicy;
 use crate::engine::server::{Engine, SimpleServer, BlockLoader, Series};
 use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
-use log::{info, debug};
+use log::{info, debug, warn};
 use crate::server::protocol::{Command, Error, Response, Insert, Select, Between};
 use serde::{Deserialize, Serialize};
 use crate::engine::Schema;
 use std::io::Write;
 use crate::engine::index::TimestampIndex;
 
-mod protocol {
+pub mod protocol {
     use serde::{Serialize, Deserialize};
 
     #[derive(Serialize, Deserialize)]
@@ -165,14 +165,17 @@ impl<S, V, EncState> Server<S, V>
     }
 
     fn handle_client(&mut self, stream: &mut std::net::TcpStream, _remote: &SocketAddr) -> Result<Response<V>, Error> {
-        // first we need to authenaticate the client
+        // first we need to authenticate the client
         self.authenticate(stream)?;
 
         let mut de = serde_json::Deserializer::from_reader(stream);
         let cmd = Command::deserialize(&mut de)
-            .map_err(|_| Error::InvalidQuery)?;
+            .map_err(|e| {
+                warn!("Invalid query submitted: {}", e);
+                Error::InvalidQuery
+            })?;
 
-        // then we read command from stream and fulfill it returing
+        // then we read command from stream and fulfill it returning
         // the result of the command's execution
         match cmd {
             Command::Select(Select { from, between }) => {
@@ -207,3 +210,6 @@ impl<S, V, EncState> Server<S, V>
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {}
