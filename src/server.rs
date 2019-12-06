@@ -223,7 +223,7 @@ impl<S, V, EncState> Server<S, V>
             Command::CreateSeries(name) => {
                 self.engine
                     .create_series(&name)
-                    .map_err(|_| Error::TableNotFound)?;
+                    .map_err(|_| Error::TableExists)?;
                 self.persist_metadata();
                 Ok(Response::Created)
             }
