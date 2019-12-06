@@ -1,6 +1,12 @@
 use crate::engine::array_vec::ArrayVec;
+use std::ops::Sub;
+use serde::{Serialize, Deserialize};
 
-#[derive(Eq, PartialEq, Debug, Copy, Clone, Ord, PartialOrd)]
+/// Represents UNIX timestamp as number of seconds from the
+/// start of the epoch.
+///
+/// Timestamps can be subtracted and converted into u64.
+#[derive(Eq, PartialEq, Debug, Copy, Clone, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Timestamp(u64);
 
 impl Into<Timestamp> for u64 {
@@ -9,11 +15,41 @@ impl Into<Timestamp> for u64 {
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Copy, Clone)]
-pub struct Point<T> {
-    timestamp: Timestamp,
-    pub(crate) value: T,
+impl Into<u64> for &Timestamp {
+    fn into(self) -> u64 {
+        self.0
+    }
 }
+
+impl Sub<Timestamp> for Timestamp {
+    type Output = u64;
+
+    fn sub(self, rhs: Timestamp) -> Self::Output {
+        self.0 - rhs.0
+    }
+}
+
+
+/// Represents a single data-point with associated Timestamp
+/// in Series object.
+#[derive(Eq, PartialEq, Debug, Copy, Clone)]
+pub struct Point<V> {
+    timestamp: Timestamp,
+    value: V,
+}
+
+impl<V> Point<V> {
+    #[inline]
+    pub fn timestamp(&self) -> &Timestamp {
+        &self.timestamp
+    }
+
+    #[inline]
+    pub fn value(&self) -> &V {
+        &self.value
+    }
+}
+
 
 pub trait Decoder {
     fn new(min_timestamp: Timestamp) -> Self;
@@ -22,62 +58,42 @@ pub trait Decoder {
 pub trait Schema<T> {
     type EncState: Default;
     type DecState: Decoder;
+    type Schema: Default;
     fn encode(state: &mut Self::EncState, point: Point<T>) -> ArrayVec<u8>;
     fn decode(state: &mut Self::DecState, buff: &[u8]) -> (Point<T>, usize);
 }
 
-pub mod array_vec {
-    pub const MAX_ENCODED_SIZE: usize = 16;
-
-    #[derive(Default)]
-    pub struct ArrayVec<T> {
-        pub data: [T; MAX_ENCODED_SIZE],
-        pub length: usize,
-    }
-
-    impl<'a, A: 'a> Extend<&'a A> for ArrayVec<A> where A: Copy {
-        fn extend<T: IntoIterator<Item=&'a A>>(&mut self, iter: T) {
-            for x in iter.into_iter() {
-                self.data[self.length] = *x;
-                self.length += 1;
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use crate::engine::array_vec::ArrayVec;
-
-        #[test]
-        fn test_extend() {
-            let mut av = ArrayVec::default();
-            av.extend(&[1, 2, 3, 4]);
-            assert_eq!(av.length, 4);
-            assert_eq!(av.data[0..5], [1, 2, 3, 4, 0]);
-        }
-    }
-}
+pub mod array_vec;
 
 pub mod f32 {
     use crate::engine::{Schema, Point, Decoder, Timestamp};
     use nano_leb128::ULEB128;
     use crate::engine::array_vec::ArrayVec;
+    use serde::{Serialize, Deserialize};
 
     pub struct F32;
 
-    #[derive(Default)]
-    pub struct F32Enc(u64);
+    #[derive(Serialize, Deserialize)]
+    pub struct F32Enc(Timestamp);
 
+    impl Default for F32Enc {
+        fn default() -> Self {
+            F32Enc(0.into())
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
     pub struct F32Dec(u64);
 
     impl Schema<f32> for F32 {
         type EncState = F32Enc;
         type DecState = F32Dec;
+        type Schema = ();
 
         fn encode(state: &mut Self::EncState, point: Point<f32>) -> ArrayVec<u8> {
             let mut array = ArrayVec::default();
-            let dt = point.timestamp.0 - state.0;
-            state.0 = point.timestamp.0;
+            let dt = point.timestamp - state.0;
+            state.0 = point.timestamp;
 
             array.length += ULEB128::from(dt)
                 .write_into(&mut array.data)
@@ -340,8 +356,10 @@ pub mod io {
     use std::fs::{File, OpenOptions};
     use std::collections::hash_map::Entry;
     use std::io::{Write, Seek, SeekFrom, Read, Error, ErrorKind};
+    use serde::{Serialize, Deserialize};
 
     #[derive(Copy, Clone, Debug)]
+    #[derive(Serialize, Deserialize)]
     pub enum SyncPolicy {
         Immediate,
         Never,
@@ -980,7 +998,7 @@ pub mod server {
 
     /// Type that represents fully-functional storage system for
     /// time-series data.
-    pub struct Server<S, V> where S: Schema<V> {
+    pub struct Engine<S, V> where S: Schema<V> {
         clock: Clock,
         series: HashMap<String, Series<S, V>>,
         last_series_id: usize,
@@ -989,9 +1007,9 @@ pub mod server {
         blocks: BlockLoader,
     }
 
-    impl<S, V> Server<S, V> where S: Schema<V> {
+    impl<S, V> Engine<S, V> where S: Schema<V> {
         pub fn new(storage: PathBuf, cache_capacity: usize, sync_policy: SyncPolicy) -> Self {
-            Server {
+            Engine {
                 clock: Default::default(),
                 series: Default::default(),
                 last_series_id: 0,
@@ -1049,15 +1067,31 @@ pub mod server {
         }
     }
 
-    pub trait SimpleServer<V> {
-        fn create_series(&mut self, name: &str);
-        fn insert_point(&mut self, series_name: &str, value: V);
-        fn retrieve_points(&mut self, series_name: &str, from: Option<Timestamp>, to: Option<Timestamp>) -> Vec<Point<V>>;
+    pub enum CreateSeriesError {
+        SeriesAlreadyExists
     }
 
-    impl<S, V> SimpleServer<V> for Server<S, V> where S: Schema<V> {
+    pub enum InsertPointError {
+        SeriesNotExists
+    }
+
+    pub enum RetrievePointsError {
+        SeriesNotExists
+    }
+
+    pub trait SimpleServer<V> {
+        fn create_series(&mut self, name: &str) -> Result<(), CreateSeriesError>;
+        fn insert_point(&mut self, series_name: &str, value: V) -> Result<(), InsertPointError>;
+        fn retrieve_points(&mut self, series_name: &str, from: Option<Timestamp>, to: Option<Timestamp>) -> Result<Vec<Point<V>>, RetrievePointsError>;
+    }
+
+    impl<S, V> SimpleServer<V> for Engine<S, V> where S: Schema<V> {
         /// Creates a new series object.
-        fn create_series(&mut self, name: &str) {
+        fn create_series(&mut self, name: &str) -> Result<(), CreateSeriesError> {
+            if self.series.contains_key(name) {
+                return Err(CreateSeriesError::SeriesAlreadyExists);
+            }
+
             let series_id = self.last_series_id;
             let index_file = self.storage.join(format!("{}.idx", series_id));
             let index = TimestampIndex::create_or_load(&index_file, self.sync_policy)
@@ -1073,12 +1107,17 @@ pub mod server {
                 last_timestamp: Timestamp(0),
             });
             self.last_series_id += 1;
+            Ok(())
         }
 
         /// Inserts specified point into the specified Series object.
-        fn insert_point(&mut self, series_name: &str, value: V) {
+        fn insert_point(&mut self, series_name: &str, value: V) -> Result<(), InsertPointError> {
+            if !self.series.contains_key(series_name) {
+                return Err(InsertPointError::SeriesNotExists);
+            }
+
             let timestamp = self.clock.now();
-            self.insert_point_at(series_name, value, timestamp)
+            Ok(self.insert_point_at(series_name, value, timestamp))
         }
 
         /// Retrieves all data points that happened between `from` and `to`
@@ -1087,7 +1126,11 @@ pub mod server {
         fn retrieve_points(&mut self,
                            series_name: &str,
                            from: Option<Timestamp>,
-                           to: Option<Timestamp>) -> Vec<Point<V>> {
+                           to: Option<Timestamp>) -> Result<Vec<Point<V>>, RetrievePointsError> {
+            if !self.series.contains_key(series_name) {
+                return Err(RetrievePointsError::SeriesNotExists);
+            }
+
             let mut points = vec![];
             let series = self.series
                 .get_mut(series_name)
@@ -1100,7 +1143,7 @@ pub mod server {
 
             // we start at block that does not exists yet -> empty result
             if start_block > series.blocks - 1 {
-                return vec![];
+                return Ok(vec![]);
             }
 
             let end_block = to
@@ -1137,13 +1180,13 @@ pub mod server {
                 }
             }
 
-            points
+            Ok(points)
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use crate::engine::server::{Server, SimpleServer};
+        use crate::engine::server::{Engine, SimpleServer};
         use crate::engine::f32::F32;
         use crate::engine::io::SyncPolicy;
         use tempdir::TempDir;
@@ -1152,7 +1195,7 @@ pub mod server {
         #[test]
         fn test_simple_commands() {
             let dir = TempDir::new("test_simple_commands").unwrap();
-            let mut s: Server<F32, f32> = Server::new(
+            let mut s: Engine<F32, f32> = Engine::new(
                 dir.path().join("storage/"),
                 1024,
                 SyncPolicy::Never,

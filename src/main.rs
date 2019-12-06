@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 use std::time::Instant;
-use tsdb::engine::server::{Server, SimpleServer};
+use tsdb::engine::server::{Engine, SimpleServer};
 use tsdb::engine::f32::F32;
 use tsdb::engine::io::SyncPolicy;
+
 
 fn main() {
     simple_logger::init_with_level(log::Level::Debug).unwrap();
 
-    let mut s: Server<F32, f32> = Server::new(
+    let mut s: Engine<F32, f32> = Engine::new(
         PathBuf::from("./storage/"),
         1024,
         SyncPolicy::Never,

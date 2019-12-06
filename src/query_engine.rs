@@ -1,5 +1,5 @@
 use crate::engine::{Timestamp, Schema, Point};
-use crate::engine::server::{Server, SimpleServer};
+use crate::engine::server::{Engine, SimpleServer};
 use std::fmt::Display;
 use static_assertions::_core::fmt::{Formatter, Error};
 use std::ops::{AddAssign, Sub, Div};
@@ -177,9 +177,9 @@ pub trait QueryEngine<V> {
     fn handle_query(&mut self, query: Query<V>) -> QueryResult<V>;
 }
 
-impl<S, V> Server<S, V> where S: Schema<V> {}
+impl<S, V> Engine<S, V> where S: Schema<V> {}
 
-impl<S, V: 'static> QueryEngine<V> for Server<S, V>
+impl<S, V: 'static> QueryEngine<V> for Engine<S, V>
     where S: Schema<V>,
           V: Copy + AddAssign<V> + Sub<V, Output=V> + Div<u64, Output=V>
 {
