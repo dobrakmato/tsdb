@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Schema;
 use std::io::Write;
 use crate::engine::index::TimestampIndex;
+use std::time::Duration;
 
 pub mod protocol {
     use serde::{Serialize, Deserialize};
@@ -59,6 +60,14 @@ pub struct Settings {
     pub block_cache_capacity: usize,
     pub block_sync_policy: SyncPolicy,
     pub index_sync_policy: SyncPolicy,
+
+    /// Socket read timeout in milliseconds.
+    pub socket_read_timeout: u64,
+
+    /// Socket write timeout in milliseconds.
+    pub socket_write_timeout: u64,
+
+    /// Listen string in 'hostname:port' format.
     pub listen: String,
 }
 
@@ -170,6 +179,10 @@ impl<S, V, EncState> Server<S, V>
         loop {
             let (mut stream, remote) = self.tcp.accept().unwrap();
             debug!("New client from {:?}", remote);
+            stream.set_read_timeout(Some(Duration::from_millis(self.settings.socket_read_timeout)))
+                .unwrap();
+            stream.set_write_timeout(Some(Duration::from_millis(self.settings.socket_write_timeout)))
+                .unwrap();
             match self.handle_client(&mut stream, &remote) {
                 Ok(response) => {
                     let response = serde_json::to_string(&response).unwrap();

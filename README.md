@@ -13,7 +13,7 @@ Features:
 - [ ] `WHERE` on timestamp
 - [ ] `WHERE` on value
 - [ ] `GROUP BY` support on timestamp
-- [ ] textual command interface
+- [x] textual command interface
 - [ ] binary command interface
 - [ ] multiple scalars (tuples) per data-point
 - [ ] old data downsampling
@@ -76,6 +76,12 @@ CREATE SERIES {series} {schema}
 CREATE SERIES outdoor_sunlight f32
 ```
 
+```json
+{
+  "CreateSeries": "default"
+}
+```
+
 #### List series
 
 Returns a list of all available series inside the database.
@@ -93,6 +99,16 @@ INSERT INTO {series} {value}
 INSERT INTO outdoor_sunlight 4806.0
 ```
 
+```json
+{
+  "Insert": {
+    "to": "default",
+    "value": 3.14
+  }
+}
+```
+
+
 #### Query values
 
 Gets all data points inside the specified **Series** object in specified range of time.
@@ -100,6 +116,18 @@ Gets all data points inside the specified **Series** object in specified range o
 ```
 SELECT {series} BETWEEN {start_timestamp} AND {end_timestamp}
 SELECT outdoor_sunlight BETWEEN 01-01-2019 AND 02-01-2019
+```
+
+```json
+{
+  "Select": {
+    "from": "default",
+    "between": {
+      "min": null,
+      "max": null
+    }
+  }
+}
 ```
 
 It is also possible to query result of running an aggregate function on specified range data points in the specified **Series** object.

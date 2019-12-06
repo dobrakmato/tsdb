@@ -1061,6 +1061,7 @@ pub mod server {
                 fn_write_encoded,
             );
             series.timestamp_index.set_max(block_spec.block_id, timestamp);
+            series.timestamp_index.write_dirty_part();
             series.last_timestamp = timestamp;
             series.last_block_used_bytes += encoded.length;
         }
