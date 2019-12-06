@@ -72,7 +72,7 @@ pub mod f32 {
 
     pub struct F32;
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Copy, Clone)]
     pub struct F32Enc(Timestamp);
 
     impl Default for F32Enc {
@@ -81,7 +81,7 @@ pub mod f32 {
         }
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Copy, Clone)]
     pub struct F32Dec(u64);
 
     impl Schema<f32> for F32 {

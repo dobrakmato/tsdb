@@ -8,13 +8,13 @@ use tsdb::server::protocol::{Command, Insert, Select, Between};
 fn main() {
     simple_logger::init_with_level(log::Level::Debug).unwrap();
 
-    println!("{}", serde_json::to_string(&Command::<f32>::CreateSeries("default")).unwrap());
+    println!("{}", serde_json::to_string(&Command::<f32>::CreateSeries("default".into())).unwrap());
     println!("{}", serde_json::to_string(&Command::Insert(Insert {
-        to: "default",
+        to: "default".into(),
         value: 3.14,
     })).unwrap());
     println!("{}", serde_json::to_string(&Command::<f32>::Select(Select {
-        from: "default",
+        from: "default".into(),
         between: Between { min: None, max: None },
     })).unwrap());
 

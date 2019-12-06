@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use crate::engine::io::SyncPolicy;
 use crate::engine::server::{Engine, SimpleServer, BlockLoader, Series};
 use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
-use log::{info, debug, warn};
+use log::{info, debug, warn, error};
 use crate::server::protocol::{Command, Error, Response, Insert, Select, Between};
 use serde::{Deserialize, Serialize};
 use crate::engine::Schema;
@@ -19,22 +19,22 @@ pub mod protocol {
     }
 
     #[derive(Serialize, Deserialize)]
-    pub struct Select<'a> {
-        pub from: &'a str,
+    pub struct Select {
+        pub from: String,
         pub between: Between,
     }
 
     #[derive(Serialize, Deserialize)]
-    pub struct Insert<'a, V> {
-        pub to: &'a str,
+    pub struct Insert<V> {
+        pub to: String,
         pub value: V,
     }
 
     #[derive(Serialize, Deserialize)]
-    pub enum Command<'a, V> {
-        Select(Select<'a>),
-        Insert(Insert<'a, V>),
-        CreateSeries(&'a str),
+    pub enum Command<V> {
+        Select(Select),
+        Insert(Insert<V>),
+        CreateSeries(String),
     }
 
     #[derive(Serialize, Deserialize)]
@@ -87,7 +87,7 @@ pub struct Server<S, V> where S: Schema<V> {
 impl<S, V, EncState> Server<S, V>
     where S: Schema<V, EncState=EncState>,
           for<'a> V: Copy + Serialize + Deserialize<'a>,
-          for<'a> EncState: Serialize + Deserialize<'a> + Default
+          for<'a> EncState: Serialize + Deserialize<'a> + Default + Copy
 {
     pub fn new(settings: Settings) -> Self {
         let path = settings.storage.join("server.json");
@@ -144,6 +144,27 @@ impl<S, V, EncState> Server<S, V>
         }
     }
 
+    fn persist_metadata(&self) {
+        let path = self.settings.storage.join("server.json");
+        let data = ServerData {
+            series: self.engine.series.iter().map(|(name, series)| {
+                SeriesData {
+                    id: series.id,
+                    name: name.clone(),
+                    enc_state: series.enc_state,
+                    blocks: series.blocks,
+                    last_block_used_bytes: series.last_block_used_bytes,
+                    last_timestamp: (&series.last_timestamp).into(),
+                }
+            }).collect(),
+            last_series_id: self.engine.last_series_id,
+        };
+
+        if let Err(e) = std::fs::write(path, serde_json::to_string(&data).unwrap()) {
+            error!("Cannot save server metadata! {}", e)
+        }
+    }
+
     pub fn listen(&mut self) -> Self {
         info!("TCP Server listening on {:?}...", self.tcp.local_addr().unwrap());
         loop {
@@ -181,7 +202,7 @@ impl<S, V, EncState> Server<S, V>
             Command::Select(Select { from, between }) => {
                 let Between { min, max } = between;
                 let data = self.engine
-                    .retrieve_points(from,
+                    .retrieve_points(&from,
                                      min.map(|x| x.into()),
                                      max.map(|x| x.into()),
                     )
@@ -189,18 +210,21 @@ impl<S, V, EncState> Server<S, V>
                     .iter()
                     .map(|p| (p.timestamp().into(), *p.value()))
                     .collect();
+                self.persist_metadata();
                 Ok(Response::Data(data))
             }
             Command::Insert(Insert { to, value }) => {
                 self.engine
-                    .insert_point(to, value)
+                    .insert_point(&to, value)
                     .map_err(|_| Error::TableNotFound)?;
+                self.persist_metadata();
                 Ok(Response::Inserted)
             }
             Command::CreateSeries(name) => {
                 self.engine
-                    .create_series(name)
+                    .create_series(&name)
                     .map_err(|_| Error::TableNotFound)?;
+                self.persist_metadata();
                 Ok(Response::Created)
             }
         }
