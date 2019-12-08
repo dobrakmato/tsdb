@@ -101,6 +101,11 @@ impl<S, V, EncState> Server<S, V>
     pub fn new(settings: Settings) -> Self {
         let path = settings.storage.join("server.json");
 
+        debug!("listen={}", settings.listen);
+        debug!("storage={}", settings.storage.canonicalize().unwrap().to_str().unwrap());
+        debug!("socket read timeout={}", settings.socket_read_timeout);
+        debug!("socket write timeout={}", settings.socket_write_timeout);
+
         let server_data: ServerData<EncState> = if path.exists() {
             let reader = std::fs::File::open(path).unwrap();
             serde_json::from_reader(reader).unwrap()
@@ -116,6 +121,8 @@ impl<S, V, EncState> Server<S, V>
                 let index_file = settings.storage.join(format!("{}.idx", s.id));
                 let index = TimestampIndex::create_or_load(&index_file, settings.index_sync_policy)
                     .unwrap();
+
+                debug!("Loaded series: {} (ID {}) with {} blocks.", s.name, s.id, s.blocks);
 
                 (s.name.to_owned(), Series {
                     id: s.id,
@@ -177,22 +184,24 @@ impl<S, V, EncState> Server<S, V>
     pub fn listen(&mut self) -> Self {
         info!("TCP Server listening on {:?}...", self.tcp.local_addr().unwrap());
         loop {
-            let (mut stream, remote) = self.tcp.accept().unwrap();
+            let opt = self.tcp.accept().ok();
+            if opt.is_none() {
+                continue;
+            }
+            let (mut stream, remote) = opt.unwrap();
             debug!("New client from {:?}", remote);
-            stream.set_read_timeout(Some(Duration::from_millis(self.settings.socket_read_timeout)))
-                .unwrap();
-            stream.set_write_timeout(Some(Duration::from_millis(self.settings.socket_write_timeout)))
-                .unwrap();
+            stream.set_read_timeout(Some(Duration::from_millis(self.settings.socket_read_timeout))).ok();
+            stream.set_write_timeout(Some(Duration::from_millis(self.settings.socket_write_timeout))).ok();
             match self.handle_client(&mut stream, &remote) {
                 Ok(response) => {
                     let response = serde_json::to_string(&response).unwrap();
-                    stream.write_all(response.as_bytes()).unwrap();
-                    stream.shutdown(Shutdown::Both).unwrap();
+                    stream.write_all(response.as_bytes()).ok();
+                    stream.shutdown(Shutdown::Both).ok();
                 }
                 Err(err) => {
                     let err = serde_json::to_string(&err).unwrap();
-                    stream.write_all(err.as_bytes()).unwrap();
-                    stream.shutdown(Shutdown::Both).unwrap()
+                    stream.write_all(err.as_bytes()).ok();
+                    stream.shutdown(Shutdown::Both).ok();
                 }
             }
         }
