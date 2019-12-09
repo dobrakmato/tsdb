@@ -452,7 +452,7 @@ pub mod io {
     }
 
     pub struct BlockIO {
-        open_files: HashMap<usize, StorageFile>,
+        open_files: HashMap<BlockSpec, StorageFile>,
         sync_policy: SyncPolicy,
         storage: PathBuf,
     }
@@ -495,7 +495,7 @@ pub mod io {
         fn create_or_load_file(&mut self, spec: &BlockSpec) -> &mut StorageFile {
             // if the file is already open we just return in. in the
             // other case we need to either load the file or create it.
-            match self.open_files.entry(spec.file_id()) {
+            match self.open_files.entry(*spec) {
                 Entry::Occupied(t) => t.into_mut(),
                 Entry::Vacant(t) => {
                     let file_path = spec.determine_file_path(&self.storage);
@@ -1055,6 +1055,7 @@ pub mod server {
             };
 
             let block_spec = series.last_block_spec();
+            println!("{:?}", block_spec);
             self.blocks.acquire_unevictable_then_write(
                 block_spec,
                 series.last_block_used_bytes,

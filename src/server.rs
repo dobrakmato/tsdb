@@ -101,8 +101,6 @@ impl<S, V, EncState> Server<S, V>
     pub fn new(settings: Settings) -> Self {
         let path = settings.storage.join("server.json");
 
-        debug!("listen={}", settings.listen);
-        debug!("storage={}", settings.storage.canonicalize().unwrap().to_str().unwrap());
         debug!("socket read timeout={}", settings.socket_read_timeout);
         debug!("socket write timeout={}", settings.socket_write_timeout);
 
