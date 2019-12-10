@@ -9,6 +9,7 @@ use crate::engine::Schema;
 use std::io::Write;
 use crate::engine::index::TimestampIndex;
 use std::time::Duration;
+use std::fmt::Debug;
 
 pub mod protocol {
     use serde::{Serialize, Deserialize};
@@ -95,6 +96,7 @@ pub struct Server<S, V> where S: Schema<V> {
 
 impl<S, V, EncState> Server<S, V>
     where S: Schema<V, EncState=EncState>,
+    V: Debug,
           for<'a> V: Copy + Serialize + Deserialize<'a>,
           for<'a> EncState: Serialize + Deserialize<'a> + Default + Copy
 {

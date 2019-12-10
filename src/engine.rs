@@ -869,6 +869,7 @@ pub mod server {
     use crate::engine::Decoder;
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::fmt::Debug;
 
     /// Type that contains metadata about series.
     pub struct Series<S, V> where S: Schema<V> {
@@ -1033,6 +1034,7 @@ pub mod server {
 
                     // load the block if for some reason is not loaded and write the free bytes
                     self.blocks.acquire_then_write(last_block_spec, series.last_block_used_bytes, |b| {
+                        println!("Closing block {:?} with {} free bytes.", last_block_spec, last_block_free_bytes);
                         b.set_free_bytes(last_block_free_bytes as u8);
                     });
 
@@ -1055,7 +1057,6 @@ pub mod server {
             };
 
             let block_spec = series.last_block_spec();
-            println!("{:?}", block_spec);
             self.blocks.acquire_unevictable_then_write(
                 block_spec,
                 series.last_block_used_bytes,
@@ -1086,7 +1087,7 @@ pub mod server {
         fn retrieve_points(&mut self, series_name: &str, from: Option<Timestamp>, to: Option<Timestamp>) -> Result<Vec<Point<V>>, RetrievePointsError>;
     }
 
-    impl<S, V> SimpleServer<V> for Engine<S, V> where S: Schema<V> {
+    impl<S, V> SimpleServer<V> for Engine<S, V> where S: Schema<V>, V: Debug {
         /// Creates a new series object.
         fn create_series(&mut self, name: &str) -> Result<(), CreateSeriesError> {
             if self.series.contains_key(name) {
@@ -1223,6 +1224,24 @@ pub mod server {
             assert_eq!(s.retrieve_points("default", Some(Timestamp(5)), Some(Timestamp(5))).ok().unwrap().len(), 3);
             assert_eq!(s.retrieve_points("default", Some(Timestamp(10)), Some(Timestamp(1))).ok().unwrap().len(), 0);
             assert_eq!(s.retrieve_points("default", Some(Timestamp(11)), Some(Timestamp(100))).ok().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn test_block_boundary() {
+            let dir = TempDir::new("test_block_boundary").unwrap();
+            let mut s: Engine<F32, f32> = Engine::new(
+                dir.path().join("storage/"),
+                1024,
+                SyncPolicy::Never,
+            );
+
+            s.create_series("default");
+            for i in 0..10000 {
+                s.insert_point("default", i as f32);
+            }
+
+            let results = s.retrieve_points("default", None, None).ok().unwrap();
+            assert_eq!(results.len(), 10000)
         }
     }
 }
