@@ -632,6 +632,18 @@ pub mod index {
             }
         }
 
+        /// Invalidates and removes all data in this index. The changes are not
+        /// written to disk and the internal data structure is empty as if the
+        /// index was newly created.
+        pub fn invalidate(&mut self) {
+            std::mem::replace(&mut self.data, vec![]);
+        }
+
+        #[inline]
+        pub fn len(&self) -> usize {
+            return self.data.len()
+        }
+
         /// Ensures that the internal Vec storage is large enough to store
         /// data for block specified by `for_block_id`. If the internal Vec
         /// is not large enough the capacity of Vec is increased by 8 additional
@@ -883,7 +895,7 @@ pub mod server {
 
     impl<S, V> Series<S, V> where S: Schema<V> {
         #[inline]
-        fn create_block_spec(&self, block_id: usize) -> BlockSpec {
+        pub fn create_block_spec(&self, block_id: usize) -> BlockSpec {
             BlockSpec { series_id: self.id, block_id }
         }
 

@@ -5,11 +5,12 @@ use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use log::{info, debug, warn, error};
 use crate::server::protocol::{Command, Error, Response, Insert, Select, Between};
 use serde::{Deserialize, Serialize};
-use crate::engine::Schema;
+use crate::engine::{Schema, Timestamp};
 use std::io::Write;
 use crate::engine::index::TimestampIndex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::fmt::Debug;
+use crate::engine::Decoder;
 
 pub mod protocol {
     use serde::{Serialize, Deserialize};
@@ -141,7 +142,7 @@ impl<S, V, EncState> Server<S, V>
             settings.block_sync_policy,
         );
 
-        let engine = Engine {
+        let mut engine = Engine {
             clock: Default::default(),
             storage: settings.storage.clone(),
             sync_policy: settings.block_sync_policy,
@@ -149,6 +150,45 @@ impl<S, V, EncState> Server<S, V>
             series,
             blocks,
         };
+
+        // verify all indices is correct if not, rebuild it.
+        for (k, v) in engine.series.iter_mut() {
+            if v.blocks != v.timestamp_index.len() {
+                error!("Loaded index for series {} has incorrect length. Rebuilding...", k);
+                let start = Instant::now();
+
+                v.timestamp_index.invalidate();
+
+                let mut dec_state = S::DecState::new(0.into());
+
+                for block_id in 0..v.blocks {
+                    let spec = v.create_block_spec(block_id);
+                    let block = engine.blocks.acquire_block(spec);
+
+                    let mut read_bytes = 0;
+                    let written_bytes = if block_id == v.blocks-1 { v.last_block_used_bytes } else { block.data_len() };
+
+                    let mut min: Timestamp = std::u64::MAX.into();
+                    let mut max: Timestamp = std::u64::MIN.into();
+
+                    while read_bytes < written_bytes {
+                        let offset_buff = &block.data[read_bytes..];
+                        let (point, rb) = S::decode(&mut dec_state, offset_buff);
+
+                        min = min.min(*point.timestamp());
+                        max = max.max(*point.timestamp());
+
+                        read_bytes += rb
+                    }
+
+                    v.timestamp_index.set_max(block_id, max);
+                    v.timestamp_index.set_min(block_id, min);
+                }
+
+                v.timestamp_index.write_dirty_part();
+                info!("Rebuilt index in {} secs...", start.elapsed().as_secs_f32())
+            }
+        }
 
         let tcp = TcpListener::bind(settings.listen.clone())
             .unwrap();
