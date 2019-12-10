@@ -566,6 +566,7 @@ pub mod index {
     use std::path::Path;
     use std::io::{Error, Read, Seek, SeekFrom, Write};
 
+    #[derive(Debug)]
     struct MinMax {
         min: Timestamp,
         max: Timestamp,
@@ -601,6 +602,7 @@ pub mod index {
             };
 
             file.read_exact(bytes)?;
+            unsafe { data.set_len(elements); }
 
             Ok(TimestampIndex {
                 file,
@@ -744,7 +746,7 @@ pub mod index {
                 std::slice::from_raw_parts(ptr, elements * std::mem::size_of::<MinMax>())
             };
 
-            self.file.write(&bytes[dirty_from_bytes..])
+            self.file.write_all(&bytes[dirty_from_bytes..])
                 .expect("cannot write to index file");
 
             if let SyncPolicy::Immediate = &self.sync_policy {
@@ -837,6 +839,39 @@ pub mod index {
             assert_eq!(idx.find_block(&Timestamp(9)), (3));
             assert_eq!(idx.find_block(&Timestamp(10)), (3));
             assert_eq!(idx.find_block(&Timestamp(11)), (5));
+        }
+
+        #[test]
+        fn test_save_load_index() {
+            let dir = TempDir::new("tsdb").unwrap();
+
+            {
+                let mut idx = TimestampIndex::create(
+                    &dir.path().join("test_save_load_index"),
+                    SyncPolicy::Never
+                ).expect("cannot create idx");
+
+                idx.set_max(0, Timestamp(10));
+                idx.set_min(0, Timestamp(11));
+                idx.set_max(1, Timestamp(20));
+                idx.set_min(1, Timestamp(21));
+
+                assert_eq!(idx.len(), 2);
+
+                idx.write_dirty_part();
+            }
+
+            let mut idx = TimestampIndex::load(
+                &dir.path().join("test_save_load_index"),
+            SyncPolicy::Never
+            ).expect("cannot load index");
+
+            assert_eq!(idx.len(), 2);
+
+            assert_eq!(*idx.get_max(0), Timestamp(10));
+            assert_eq!(*idx.get_min(0), Timestamp(11));
+            assert_eq!(*idx.get_max(1), Timestamp(20));
+            assert_eq!(*idx.get_min(1), Timestamp(21));
         }
     }
 }
