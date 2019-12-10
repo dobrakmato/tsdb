@@ -1034,7 +1034,7 @@ pub mod server {
 
                     // load the block if for some reason is not loaded and write the free bytes
                     self.blocks.acquire_then_write(last_block_spec, series.last_block_used_bytes, |b| {
-                        println!("Closing block {:?} with {} free bytes.", last_block_spec, last_block_free_bytes);
+                        debug!("Closing block {:?} with {} free bytes.", last_block_spec, last_block_free_bytes);
                         b.set_free_bytes(last_block_free_bytes as u8);
                     });
 
@@ -1165,7 +1165,8 @@ pub mod server {
                 let block = self.blocks.acquire_block(spec);
 
                 let mut read_bytes = 0;
-                let written_bytes = series.last_block_used_bytes;
+                let written_bytes = if block_id == end_block { series.last_block_used_bytes } else { block.data_len() };
+
                 while read_bytes < written_bytes {
                     let offset_buff = &block.data[read_bytes..];
                     let (point, rb) = S::decode(&mut dec_state, offset_buff);
@@ -1236,12 +1237,12 @@ pub mod server {
             );
 
             s.create_series("default");
-            for i in 0..10000 {
+            for i in 0..3000 {
                 s.insert_point("default", i as f32);
             }
 
             let results = s.retrieve_points("default", None, None).ok().unwrap();
-            assert_eq!(results.len(), 10000)
+            assert_eq!(results.len(), 3000)
         }
     }
 }
