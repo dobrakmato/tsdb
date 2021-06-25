@@ -1,14 +1,12 @@
 use std::path::PathBuf;
 use crate::engine::io::SyncPolicy;
 use crate::engine::server::{Engine, SimpleServer, BlockLoader, Series};
-use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
-use log::{info, debug, warn, error};
+use log::{info, debug, error};
 use crate::server::protocol::{Command, Error, Response, Insert, Select, Between};
 use serde::{Deserialize, Serialize};
 use crate::engine::{Schema, Timestamp};
-use std::io::Write;
 use crate::engine::index::TimestampIndex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::fmt::Debug;
 use crate::engine::Decoder;
 
@@ -92,12 +90,11 @@ pub struct ServerData<EncState> {
 pub struct Server<S, V> where S: Schema<V> {
     settings: Settings,
     engine: Engine<S, V>,
-    tcp: TcpListener,
 }
 
 impl<S, V, EncState> Server<S, V>
     where S: Schema<V, EncState=EncState>,
-    V: Debug,
+          V: Debug,
           for<'a> V: Copy + Serialize + Deserialize<'a>,
           for<'a> EncState: Serialize + Deserialize<'a> + Default + Copy
 {
@@ -166,7 +163,7 @@ impl<S, V, EncState> Server<S, V>
                     let block = engine.blocks.acquire_block(spec);
 
                     let mut read_bytes = 0;
-                    let written_bytes = if block_id == v.blocks-1 { v.last_block_used_bytes } else { block.data_len() };
+                    let written_bytes = if block_id == v.blocks - 1 { v.last_block_used_bytes } else { block.data_len() };
 
                     let mut min: Timestamp = std::u64::MAX.into();
                     let mut max: Timestamp = std::u64::MIN.into();
@@ -190,16 +187,13 @@ impl<S, V, EncState> Server<S, V>
             }
         }
 
-        let tcp = TcpListener::bind(settings.listen.clone())
-            .unwrap();
-
         Server {
             engine,
-            settings,
-            tcp,
+            settings
         }
     }
 
+    /// Persists metadata (information about series) to the disk.
     fn persist_metadata(&self) {
         let path = self.settings.storage.join("server.json");
         let data = ServerData {
@@ -221,45 +215,10 @@ impl<S, V, EncState> Server<S, V>
         }
     }
 
-    pub fn listen(&mut self) -> Self {
-        info!("TCP Server listening on {:?}...", self.tcp.local_addr().unwrap());
-        loop {
-            let opt = self.tcp.accept().ok();
-            if opt.is_none() {
-                continue;
-            }
-            let (mut stream, remote) = opt.unwrap();
-            debug!("New client from {:?}", remote);
-            stream.set_read_timeout(Some(Duration::from_millis(self.settings.socket_read_timeout))).ok();
-            stream.set_write_timeout(Some(Duration::from_millis(self.settings.socket_write_timeout))).ok();
-            match self.handle_client(&mut stream, &remote) {
-                Ok(response) => {
-                    let response = serde_json::to_string(&response).unwrap();
-                    stream.write_all(response.as_bytes()).ok();
-                    stream.shutdown(Shutdown::Both).ok();
-                }
-                Err(err) => {
-                    let err = serde_json::to_string(&err).unwrap();
-                    stream.write_all(err.as_bytes()).ok();
-                    stream.shutdown(Shutdown::Both).ok();
-                }
-            }
-        }
-    }
-
-    fn handle_client(&mut self, stream: &mut std::net::TcpStream, _remote: &SocketAddr) -> Result<Response<V>, Error> {
-        // first we need to authenticate the client
-        self.authenticate(stream)?;
-
-        let mut de = serde_json::Deserializer::from_reader(stream);
-        let cmd = Command::deserialize(&mut de)
-            .map_err(|e| {
-                warn!("Invalid query submitted: {}", e);
-                Error::InvalidQuery
-            })?;
-
-        // then we read command from stream and fulfill it returning
-        // the result of the command's execution
+    /// Handles the command on the server and returns the appropriate
+    /// result. The calling method will handle the result (usually
+    /// writes the result into a socket).
+    pub fn handle_command(&mut self, cmd: Command<V>) -> Result<Response<V>, Error> {
         match cmd {
             Command::Select(Select { from, between }) => {
                 let Between { min, max } = between;
@@ -290,10 +249,6 @@ impl<S, V, EncState> Server<S, V>
                 Ok(Response::Created)
             }
         }
-    }
-
-    fn authenticate(&mut self, _stream: &mut TcpStream) -> Result<(), Error> {
-        Ok(())
     }
 }
 

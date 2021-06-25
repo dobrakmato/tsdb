@@ -1,0 +1,186 @@
+[h] - multiple aggregates
+- last-block cache smart evicting
+- fsync policies
+- multiple codecs
+- text query parser
+- index based selects
+- group by
+- support tuples as value
+- support named tuples as values
+
+Timestamp(u64) - Type representing an UNIX timestamp
+
+Point<T> - Type representing one data-point
+  + timestamp: Timestamp
+  + value: T
+
+Schema<T> - Trait representing any schema (method of encoding the data)
+  + type EncState: Default
+  + type DecState: Default
+  + encode(state: &mut EncState, entry: Point<T>) -> SmallVec
+  + decode(state: &mut DecState, buff: &[u8]) -> (Point<T>, usize)
+
+F32 : Schema - One realization of Schema
+
+BlockHeader - Type representing metadata about the Block.
+  + free_bytes
+
+Block - Type owning data of block
+  + header: BlockHeader
+  + data: [u8]
+
+BlockSpec - Type that represents a "handle" to potentially unloaded Block
+  + block_id
+  + series_id
+
+BlockCache - Type that owns loaded Blocks
+  + blocks_cache: Map<BlockSpec, Block>
+  + lru: Vec<Option<BlockSpec>>
+  + lru_idx
+  + contains_block(spec: BlockSpec) -> bool
+  + get_mut(spec: BlockSpec) -> &mut Block
+  + insert(spec: BlockSpec, block: Block)
+
+FsyncPolicy - Policy of sync-ing data to disk
+  - Immediate
+  - Never
+  - Every10s
+
+BlockIO - load & saving block files to disk
+  + open_files: Map<Path, File>
+  + fsync_policy: FsyncPolicy
+  + create_load_block(spec: BlockSpec) -> Block
+  + write_block(spec: BlockSpec, block: &mut Block)
+
+BlocksInfo - Information about block storage structure.
+  + block_count: usize
+  + block_size: usize
+  + last_block_unused_bytes
+
+TimestampIndex
+  + file: File
+  + fsync_policy: FsyncPolicy
+  + data: Vec<Timestamp>
+  + dirty_from_idx
+  + create_or_load() -> TimestampIndex
+  + write_index()
+
+Series - Type that contains metadata about series
+  + name: String
+  + schema: F32
+  + blocks_info: BlocksInfo
+  + enc_state:
+  + timestamp_index: TimestampIndex
+
+Clock - Source of time that provides timestamps that do not go backwards in time
+  + now() -> Timestamp
+
+Server
+  + clock: Clock
+  + series: Map<String, Series>
+  + cache: BlockCache
+  + block_io: BlockIO
+  + simple_commands: SimpleCommands
+  + query_engine: QueryEngine
+
+SimpleCommands - Type that provides simple commands of DB for storing and retrieving data
+  + create_series(series_name: String)
+  + insert_point<T>(series_name: String, point: Point<T>)
+  + retrieve_points<T>(series_name: String, from: Timestamp, to: Timestamp) -> Iter<Point<T>>
+
+
+QueryEngine - Type that provides advanced querying capabilities (filtering, grouping, aggregate functions, sub-queries)
+  + handle_query(query: Query) -> Result
+
+Selectable
+  - Timestamp
+  - Value
+  - AggFn
+
+From
+  - Series(String)
+  - Temporary(Result)
+
+GroupBy
+  - Minute
+  - Hour
+  - Day
+  - Week
+  - Month
+  - Year
+
+Between
+  + min_timestamp: Option<Timestamp>
+  + max_timestamp: Option<Timestamp>
+
+Cond<T>
+  - Lt(T)
+  - Gt(T)
+  - Le(T)
+  - Ge(T)
+  - Eq(T)
+  - Ne(T)
+
+Query
+  + from: From
+  + select: Vec<Selectable>
+  + between: Option<Between>
+  + where: Vec<Cond>
+  + group_by: GroupBy
+
+Result<T>
+  + points: Vec<Point<T>> ?????
+
+
+SELECT timestamp, value FROM outdoor_sunlight AFTER '01-01-2019 20:00:05'
+SELECT timestamp, value FROM outdoor_sunlight BETWEEN 01-01-2019 AND 02-01-2019
+Select([S::Timestamp, S::Value], Retrieve(Timestamp(), Timestamp(), "outdoor_sunlight"))
+
+SELECT AVG(value), MIN(value), MAX(value) FROM outdoor_sunlight BETWEEN 01-01-2019 AND 02-01-2019 GROUP BY HOUR
+Aggregate([Value(), Min(), Max()], A:HOUR, Retrieve(Timestamp(), Timestamp(), "outdoor_sunlight"))
+
+SELECT SUM(value), COUNT(value) FROM outdoor_sunlight AFTER NOW() - 1 HOUR
+SELECT timestamp, value FROM outdoor_sunlight WHERE value > 500
+
+SELECT AVG(a.value + b.value) FROM bikesharing_station01 a, bikesharing_station01 b GROUP BY DAY
+
+
+0.dat (series file)
+0.tsidx (main timestamp index file)
+
+Point<V>
+  + value: V
+  + timestamp: Timestamp
+  + tags: Vec<String>
+
+Series<V>
+  + id: usize
+  + timestamp_index: Index<Timestamp>
+  + indices: Vec<Index<_>>
+  + encoder_state: V::EncState
+  + schema: V::Schema
+
+
+
+
+ArrayVec - stack-allocated Vec
+
+Storage - provides fd pooling, loading/saving parts of files, fsync (periodic)
+
+Block - provides format of storing the data
+
+Index - provides indices (btree, bitmap) based on Storage & Block
+
+Cache - provides LRU cache with unevictable entries
+
+Engine - glues components together to allow storing and retrieval of data
+
+QueryEngine - provides support for advanced queries
+
+Protocol - defines how to talk to Server, parser
+
+Auth - defines authentication methods of Server
+
+Server - uses tokio to provides Engine over network, service
+
+
